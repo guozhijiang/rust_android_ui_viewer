@@ -2,6 +2,10 @@
 
 基于 Rust + [eframe/egui](https://github.com/emilk/egui) 的 Android 界面层级查看器（类似 `uiautomatorviewer`）。通过 adb 抓取设备当前界面的截图与 UI 层级（XML），直观地查看控件树、控件边界与属性。
 
+## 界面预览
+
+![Android UI Viewer 主界面](assets/screenshot.png)
+
 ## 功能
 
 - **一键抓取**：通过 adb 执行 `screencap` 和 `uiautomator dump`，同时获取截图与界面层级。
