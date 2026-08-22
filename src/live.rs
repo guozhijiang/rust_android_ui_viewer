@@ -12,8 +12,19 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::os::windows::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Prevent spawned helper processes (adb, scrcpy, powershell) from popping up
+/// their own console window. The app itself runs as a GUI subsystem, so child
+/// console programs would otherwise get a separate, "stuck-looking" cmd window
+/// on Windows. No-op on non-Windows targets.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn hide_console(cmd: &mut Command) {
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -283,7 +294,9 @@ fn auto_fetch_scrcpy_bundle() -> Result<PathBuf> {
     let ps1 = cache.join("fetch_scrcpy.ps1");
     std::fs::write(&ps1, script).context("写入 scrcpy 下载脚本失败")?;
 
-    let status = Command::new("powershell")
+    let mut ps = Command::new("powershell");
+    hide_console(&mut ps);
+    let status = ps
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -353,7 +366,9 @@ pub fn detect_scrcpy_dir(user_hint: &str) -> Result<PathBuf> {
         }
     }
 
-    if let Ok(out) = Command::new("where").arg("scrcpy").output() {
+    let mut where_cmd = Command::new("where");
+    hide_console(&mut where_cmd);
+    if let Ok(out) = where_cmd.arg("scrcpy").output() {
         if out.status.success() {
             if let Ok(text) = String::from_utf8(out.stdout) {
                 for line in text.lines() {
@@ -414,6 +429,7 @@ fn detect_serial(adb: &str, hint: &str) -> Result<Option<String>> {
 
 fn adb_run(adb: &str, serial: &str, args: &[&str]) -> Result<std::process::Output> {
     let mut cmd = Command::new(adb);
+    hide_console(&mut cmd);
     if !serial.is_empty() {
         cmd.arg("-s").arg(serial);
     }
@@ -436,12 +452,21 @@ pub fn start(
     serial_hint: String,
     scrcpy_dir_hint: String,
     max_video_size: u32,
+    bitrate: u32,
     stop: Arc<AtomicBool>,
     tx: Sender<LiveEvent>,
 ) {
     thread::spawn(move || {
         info!("live 工作线程启动");
-        let result = run(&adb, &serial_hint, &scrcpy_dir_hint, max_video_size, &stop, &tx);
+        let result = run(
+            &adb,
+            &serial_hint,
+            &scrcpy_dir_hint,
+            max_video_size,
+            bitrate,
+            &stop,
+            &tx,
+        );
         match result {
             Ok(()) => {
                 info!("live 会话正常结束");
@@ -485,6 +510,7 @@ fn run(
     serial_hint: &str,
     scrcpy_dir_hint: &str,
     max_video_size: u32,
+    bitrate: u32,
     stop: &Arc<AtomicBool>,
     tx: &Sender<LiveEvent>,
 ) -> Result<()> {
@@ -579,8 +605,13 @@ fn run(
     if max_video_size > 0 {
         cmd_args.push(format!("max_size={max_video_size}"));
     }
+    if bitrate > 0 {
+        cmd_args.push(format!("video_bitrate={bitrate}"));
+    }
 
-    let mut child = Command::new(adb)
+    let mut child = Command::new(adb);
+    hide_console(&mut child);
+    let mut child: Child = child
         .args(&cmd_args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

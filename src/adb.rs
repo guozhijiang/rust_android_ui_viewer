@@ -1,6 +1,16 @@
+use std::os::windows::process::CommandExt as _;
 use std::process::Command;
 
 use anyhow::{anyhow, Result};
+
+/// Stop spawned adb helpers from opening their own console window (the app is
+/// a GUI subsystem on Windows, so child console programs would otherwise pop a
+/// separate, stuck-looking cmd window). No-op off Windows.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn hide_console(cmd: &mut Command) {
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
 
 /// Result of a full capture: raw PNG bytes + the uiautomator XML dump.
 pub struct CaptureResult {
@@ -10,7 +20,18 @@ pub struct CaptureResult {
 
 /// Capture the current screen as a PNG via `adb exec-out screencap -p`.
 pub fn capture(adb: &str) -> Result<Vec<u8>> {
-    let out = Command::new(adb)
+    capture_serial(adb, "")
+}
+
+/// Capture the screen of a specific device (`adb -s <serial> exec-out screencap -p`).
+/// Pass an empty `serial` to target the default (single) device.
+pub fn capture_serial(adb: &str, serial: &str) -> Result<Vec<u8>> {
+    let mut c = Command::new(adb);
+    hide_console(&mut c);
+    if !serial.is_empty() {
+        c.arg("-s").arg(serial);
+    }
+    let out = c
         .args(["exec-out", "screencap", "-p"])
         .output()
         .map_err(|e| anyhow!("无法运行 adb ({}): {}\n请确认 adb 已安装并在 PATH 中。", adb, e))?;
@@ -27,10 +48,37 @@ pub fn capture(adb: &str) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// List connected, authorized devices (`adb devices`, state == "device").
+/// Returns their serial numbers; an empty vec means nothing is connected.
+pub fn list_devices(adb: &str) -> Result<Vec<String>> {
+    let mut c = Command::new(adb);
+    hide_console(&mut c);
+    let out = c
+        .arg("devices")
+        .output()
+        .map_err(|e| anyhow!("无法运行 adb ({}): {}", adb, e))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut devs = Vec::new();
+    for line in text.lines().skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let serial = it.next().unwrap_or("");
+        let state = it.next().unwrap_or("");
+        if !serial.is_empty() && state == "device" {
+            devs.push(serial.to_string());
+        }
+    }
+    Ok(devs)
+}
+
 /// Same as `dump_ui`, but targets a specific device serial (`adb -s <serial>`).
 pub fn dump_ui_serial(adb: &str, serial: &str) -> Result<String> {
     let run = |args: &str| -> Result<std::process::Output> {
         let mut c = Command::new(adb);
+        hide_console(&mut c);
         if !serial.is_empty() {
             c.arg("-s").arg(serial);
         }
@@ -76,7 +124,9 @@ pub fn dump_ui_serial(adb: &str, serial: &str) -> Result<String> {
 pub fn dump_ui(adb: &str) -> Result<String> {
     let remote = "/data/local/tmp/window_dump.xml";
 
-    let dump = Command::new(adb)
+    let mut dump = Command::new(adb);
+    hide_console(&mut dump);
+    let dump = dump
         .args(["shell", "uiautomator", "dump", remote])
         .output()
         .map_err(|e| anyhow!("无法运行 adb ({}): {}", adb, e))?;
@@ -87,7 +137,9 @@ pub fn dump_ui(adb: &str) -> Result<String> {
         ));
     }
 
-    let cat = Command::new(adb)
+    let mut cat = Command::new(adb);
+    hide_console(&mut cat);
+    let cat = cat
         .args(["exec-out", "cat", remote])
         .output()
         .map_err(|e| anyhow!("无法运行 adb ({}): {}", adb, e))?;
@@ -99,7 +151,9 @@ pub fn dump_ui(adb: &str) -> Result<String> {
     }
 
     // Best-effort cleanup of the temp file on device.
-    let _ = Command::new(adb).args(["shell", "rm", "-f", remote]).output();
+    let mut rm = Command::new(adb);
+    hide_console(&mut rm);
+    let _ = rm.args(["shell", "rm", "-f", remote]).output();
 
     let s = String::from_utf8_lossy(&cat.stdout);
     let start = s

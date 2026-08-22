@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc::Receiver};
@@ -10,7 +12,7 @@ use eframe::egui::{
 };
 use egui::PointerButton;
 
-use crate::adb::{dump_ui, dump_ui_serial, capture, CaptureResult};
+use crate::adb::{capture_serial, dump_ui, dump_ui_serial, list_devices, CaptureResult};
 use crate::live::{self, LiveControl, LiveEvent};
 use crate::ui_tree::Node;
 
@@ -152,8 +154,15 @@ pub struct UiViewerApp {
     live_control: Option<LiveControl>,
     live_serial: String,
     live_serial_hint: String,
+    /// Authorized devices currently seen by `adb devices`. Refreshed when the
+    /// user enters live-control mode or clicks the "刷新" button.
+    devices: Vec<String>,
     scrcpy_dir: String,
     max_video_size: u32,
+    /// Stream quality preset for the live session:
+    /// 0 = 清晰(原始分辨率), 1 = 流畅(中), 2 = 极速(低). Controls both
+    /// max_size and video bitrate to trade clarity for lower latency/bandwidth.
+    quality: u8,
     input_text: String,
     op_gest: Option<OpGest>,
     op_gest2: Option<OpGest>,
@@ -177,7 +186,7 @@ enum Icon {
 fn draw_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let c = rect.center();
     let s = rect.width().min(rect.height());
-    let w = s * 0.12;
+    let w = s * 0.10;
     let stroke = Stroke::new(w, color);
     let seg = |a: (f32, f32), b: (f32, f32)| {
         p.line_segment(
@@ -187,14 +196,11 @@ fn draw_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     };
     match icon {
         Icon::Back => {
-            // return / undo arrow: arrowhead points left, tail curls up on the
-            // right (like the browser/back "return" glyph ↩)
-            seg((0.34, -0.28), (0.34, 0.10)); // right tail going down
-            seg((0.34, 0.10), (0.10, 0.26)); // bottom curve
-            seg((0.10, 0.26), (-0.20, 0.20)); // continue left
-            seg((-0.20, 0.20), (-0.40, 0.20)); // shaft to arrowhead
-            seg((-0.40, 0.20), (-0.22, 0.06)); // arrowhead upper
-            seg((-0.40, 0.20), (-0.22, 0.34)); // arrowhead lower
+            // Standard "back" glyph: a left-pointing arrow. Shaft goes from
+            // right to left, arrowhead on the left (points left).
+            seg((-0.42, 0.20), (0.42, 0.20)); // shaft
+            seg((-0.42, 0.20), (-0.20, 0.02)); // arrowhead upper
+            seg((-0.42, 0.20), (-0.20, 0.38)); // arrowhead lower
         }
         Icon::Home => {
             // roof
@@ -265,15 +271,51 @@ fn draw_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
 }
 
 /// A clickable control button positioned at an absolute rect (outside the
-/// phone image). We paint the icon on top of a themed, empty egui button so
-/// its colors follow the current style and it gets proper hover/active states.
+/// phone image). Drawn as a premium "glass" circular control: a small, mostly
+/// transparent disc with a large crisp icon on top — no heavy panel background.
 fn overlay_button(ui: &mut egui::Ui, rect: Rect, icon: Icon, tooltip: &str) -> bool {
-    let resp = ui.put(rect, egui::Button::new(""));
+    let p = ui.painter();
+    let center = rect.center();
+    let r = rect.width().min(rect.height()) * 0.42; // disc radius (small footprint)
+    let id_key = format!("ovbtn_{:.0}_{:.0}", rect.min.x, rect.min.y);
+    let resp = ui.interact(rect, ui.id().with(id_key), egui::Sense::click());
+    let hovered = resp.hovered() || resp.has_focus();
+    let active = resp.is_pointer_button_down_on();
+
+    // Background: soft glass disc. Transparent at rest, slightly stronger on
+    // hover/active for tactile feedback.
+    let fill_alpha = if active { 0.34 } else if hovered { 0.22 } else { 0.12 };
+    let ring_alpha = if active { 0.55 } else if hovered { 0.45 } else { 0.32 };
+    let base = if ui.visuals().dark_mode {
+        egui::Color32::from_white_alpha((fill_alpha * 255.0) as u8)
+    } else {
+        egui::Color32::from_black_alpha((fill_alpha * 255.0) as u8)
+    };
+    p.add(egui::epaint::CircleShape::filled(
+        center,
+        r,
+        base,
+    ));
+    p.add(egui::epaint::CircleShape::stroke(
+        center,
+        r,
+        egui::Stroke::new(
+            if hovered || active { 1.6 } else { 1.2 },
+            egui::Color32::from_white_alpha((ring_alpha * 255.0) as u8),
+        ),
+    ));
+
+    // Icon: large relative to the disc.
+    let icon_size = r * 1.15;
+    let icon_box = Rect::from_center_size(center, Vec2::splat(icon_size));
+    let icon_color = if ui.visuals().dark_mode {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::from_gray(40)
+    };
+    draw_icon(p, icon_box, icon, icon_color);
+
     let clicked = resp.clicked();
-    let visuals = ui.style().interact(&resp);
-    let icon_size = rect.width().min(rect.height()) * 0.5;
-    let icon_box = Rect::from_center_size(rect.center(), Vec2::splat(icon_size));
-    draw_icon(ui.painter(), icon_box, icon, visuals.text_color());
     if !tooltip.is_empty() {
         resp.on_hover_text(tooltip);
     }
@@ -293,7 +335,7 @@ impl UiViewerApp {
             hovered_tree: None,
             hover_pix: None,
             search: String::new(),
-            status: "就绪。点击 “Capture (adb)” 抓取设备界面，或把截图/XML 拖入窗口。".to_string(),
+            status: "就绪。在 “UI树查看” 模式下点击 “Capture (adb)” 抓取设备界面，或把截图/XML 拖入窗口。".to_string(),
             capturing: false,
             zoom: 1.0,
             jump_to: None,
@@ -309,8 +351,10 @@ impl UiViewerApp {
             live_control: None,
             live_serial: String::new(),
             live_serial_hint: String::new(),
+            devices: Vec::new(),
             scrcpy_dir: String::new(),
             max_video_size: 0,
+            quality: 1,
             input_text: String::new(),
             op_gest: None,
             op_gest2: None,
@@ -352,16 +396,35 @@ impl UiViewerApp {
         Ok(())
     }
 
+    /// Refresh the list of connected, authorized devices via `adb devices`.
+    fn refresh_devices(&mut self) {
+        match list_devices(&self.adb_path) {
+            Ok(d) => {
+                self.devices = d;
+                if self.devices.is_empty() {
+                    self.status = "未检测到已连接设备（请确认 adb 已授权连接）。".to_string();
+                }
+            }
+            Err(e) => self.status = format!("刷新设备列表失败：{e}"),
+        }
+    }
+
     fn start_capture(&mut self) {
         self.capturing = true;
         self.status = "正在抓取设备界面…".to_string();
         let adb = self.adb_path.clone();
+        // Target the device chosen in live-control mode; empty = default device.
+        let serial = self.live_serial_hint.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
             let res = (|| -> anyhow::Result<CaptureResult> {
-                let screenshot = capture(&adb)?;
-                let xml = dump_ui(&adb)?;
+                let screenshot = capture_serial(&adb, &serial)?;
+                let xml = if serial.is_empty() {
+                    dump_ui(&adb)?
+                } else {
+                    dump_ui_serial(&adb, &serial)?
+                };
                 Ok(CaptureResult { screenshot, xml })
             })();
             let _ = tx.send(res);
@@ -383,12 +446,22 @@ impl UiViewerApp {
 
     /// Spawn the live scrcpy session (video stream + touch control).
     fn start_live(&mut self) {
+        // Quality preset → (max_size, video_bitrate in kbps).
+        // Lower resolution + bitrate reduces transport size and latency, which
+        // is the main cause of sluggish on-device response over adb.
+        let (max_size, bitrate) = match self.quality {
+            0 => (self.max_video_size, 0), // 清晰：原始分辨率，不限制码率
+            1 => (1024, 4_000_000),        // 流畅：最长边 1024，~4 Mbps
+            _ => (720, 2_000_000),         // 极速：最长边 720，~2 Mbps
+        };
         crate::log::info!(
-            "启动操作会话: adb={}, serial_hint={:?}, scrcpy_dir={:?}, max_size={}",
+            "启动操作会话: adb={}, serial_hint={:?}, scrcpy_dir={:?}, quality={}, max_size={}, bitrate={}",
             self.adb_path,
             self.live_serial_hint,
             self.scrcpy_dir,
-            self.max_video_size
+            self.quality,
+            max_size,
+            bitrate
         );
         let (tx, rx) = std::sync::mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -396,7 +469,8 @@ impl UiViewerApp {
             self.adb_path.clone(),
             self.live_serial_hint.clone(),
             self.scrcpy_dir.clone(),
-            self.max_video_size,
+            max_size,
+            bitrate,
             stop.clone(),
             tx,
         );
@@ -426,6 +500,8 @@ impl UiViewerApp {
     /// Fire-and-forget `adb shell <cmd>` against the live device.
     fn adb_sh(&self, cmd: &str) {
         let mut c = Command::new(&self.adb_path);
+        #[cfg(windows)]
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: don't pop a cmd box
         if !self.live_serial.is_empty() {
             c.arg("-s").arg(&self.live_serial);
         }
@@ -615,12 +691,31 @@ impl eframe::App for UiViewerApp {
 
         // ---- Top panel: actions + adb path + status ----
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            // Mode: static capture vs live control.
+            // Mode: UI tree viewer (static screenshot + hierarchy) vs live control.
             ui.horizontal_wrapped(|ui| {
                 let in_op = self.op_mode;
                 if ui.selectable_label(in_op, "操作模式").clicked() {
                     if !in_op {
-                        if !self.live_started {
+                        self.refresh_devices();
+                        // Decide whether to auto-connect. With multiple devices we
+                        // must let the user pick one first (the bottom panel shows
+                        // the device dropdown + a "连接" button).
+                        let auto_connect = if self.devices.is_empty() {
+                            true // no device: still try; live will report the error
+                        } else if self.devices.len() == 1 {
+                            self.live_serial_hint = self.devices[0].clone();
+                            true
+                        } else if !self.live_serial_hint.is_empty()
+                            && self.devices.iter().any(|d| d == &self.live_serial_hint)
+                        {
+                            true // a valid device is already selected
+                        } else {
+                            self.status =
+                                "检测到多台设备，请在下方选择目标设备后点击「连接」。"
+                                    .to_string();
+                            false
+                        };
+                        if auto_connect && !self.live_started {
                             self.start_live();
                         }
                         self.op_mode = true;
@@ -636,7 +731,7 @@ impl eframe::App for UiViewerApp {
                         self.xml_rx = None;
                     }
                 }
-                if ui.selectable_label(!in_op, "抓取模式").clicked() {
+                if ui.selectable_label(!in_op, "UI树查看").clicked() {
                     if in_op {
                         self.op_mode = false;
                         if self.live_started {
@@ -653,41 +748,46 @@ impl eframe::App for UiViewerApp {
                 }
             });
             ui.horizontal_wrapped(|ui| {
-                if ui.button("📱 Capture (adb)").clicked() && !self.capturing {
-                    self.start_capture();
-                }
-                if ui.button("🖼 Load Screenshot").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Image", &["png", "jpg", "jpeg"])
-                        .pick_file()
-                    {
-                        match std::fs::read(&path) {
-                            Ok(bytes) => {
-                                if let Err(e) = self.load_screenshot(ctx, &bytes) {
-                                    self.status = format!("图片加载失败：{e}");
-                                } else {
-                                    self.status = format!("已加载截图：{}", path.display());
+                // Screenshot / XML capture & load — and the ADB path they need —
+                // are only meaningful in the "UI树查看" mode; in live control mode
+                // they'd conflict with the streaming view, so they're hidden there.
+                if !self.op_mode {
+                    if ui.button("📱 Capture (adb)").clicked() && !self.capturing {
+                        self.start_capture();
+                    }
+                    if ui.button("🖼 Load Screenshot").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Image", &["png", "jpg", "jpeg"])
+                            .pick_file()
+                        {
+                            match std::fs::read(&path) {
+                                Ok(bytes) => {
+                                    if let Err(e) = self.load_screenshot(ctx, &bytes) {
+                                        self.status = format!("图片加载失败：{e}");
+                                    } else {
+                                        self.status = format!("已加载截图：{}", path.display());
+                                    }
                                 }
+                                Err(e) => self.status = format!("读取图片失败：{e}"),
                             }
-                            Err(e) => self.status = format!("读取图片失败：{e}"),
                         }
                     }
-                }
-                if ui.button("🌳 Load XML").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("XML", &["xml"])
-                        .pick_file()
-                    {
-                        match std::fs::read_to_string(&path) {
-                            Ok(s) => self.load_xml(&s),
-                            Err(e) => self.status = format!("读取 XML 失败：{e}"),
+                    if ui.button("🌳 Load XML").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("XML", &["xml"])
+                            .pick_file()
+                        {
+                            match std::fs::read_to_string(&path) {
+                                Ok(s) => self.load_xml(&s),
+                                Err(e) => self.status = format!("读取 XML 失败：{e}"),
+                            }
                         }
                     }
+                    ui.separator();
+                    ui.label("ADB 路径:");
+                    ui.text_edit_singleline(&mut self.adb_path);
+                    ui.separator();
                 }
-                ui.separator();
-                ui.label("ADB 路径:");
-                ui.text_edit_singleline(&mut self.adb_path);
-                ui.separator();
                 if self.capturing {
                     ui.spinner();
                     ui.label("抓取中…");
@@ -706,7 +806,31 @@ impl eframe::App for UiViewerApp {
         if self.op_mode {
             egui::TopBottomPanel::bottom("op_controls").show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("序列号:");
+                    ui.label("设备:");
+                    let sel_text = if self.live_serial_hint.is_empty() {
+                        "<选择设备>".to_string()
+                    } else {
+                        self.live_serial_hint.clone()
+                    };
+                    egui::ComboBox::from_id_source("dev_pick")
+                        .selected_text(sel_text)
+                        .show_ui(ui, |ui| {
+                            if self.devices.is_empty() {
+                                ui.label("（无设备，点刷新）");
+                            }
+                            for d in self.devices.clone() {
+                                ui.selectable_value(&mut self.live_serial_hint, d.clone(), d);
+                            }
+                        });
+                    if ui.button("刷新").clicked() {
+                        self.refresh_devices();
+                    }
+                    if ui.button("连接").clicked() {
+                        if !self.live_started {
+                            self.start_live();
+                        }
+                    }
+                    ui.label("序列号(可手填):");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.live_serial_hint).desired_width(110.0),
                     );
@@ -714,9 +838,27 @@ impl eframe::App for UiViewerApp {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.scrcpy_dir).desired_width(160.0),
                     );
-                    ui.label("最大尺寸:");
-                    ui.add(egui::DragValue::new(&mut self.max_video_size).clamp_range(0u32..=10000))
+                    ui.label("画质:")
+                        .on_hover_text("清晰度越低，传输量越小、操作越跟手；卡顿时优先选极速");
+                    egui::ComboBox::from_id_source("quality")
+                        .selected_text(match self.quality {
+                            0 => "清晰",
+                            1 => "流畅",
+                            _ => "极速",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.quality, 0, "清晰 (原始分辨率)");
+                            ui.selectable_value(&mut self.quality, 1, "流畅 (1024, ~4Mbps)");
+                            ui.selectable_value(&mut self.quality, 2, "极速 (720, ~2Mbps)");
+                        });
+                    if self.quality == 0 {
+                        ui.label("最大尺寸:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.max_video_size)
+                                .clamp_range(0u32..=10000),
+                        )
                         .on_hover_text("0 = 设备原始分辨率");
+                    }
                     ui.separator();
                     ui.label("文本输入:");
                     ui.add(
@@ -824,11 +966,27 @@ impl eframe::App for UiViewerApp {
                     ui.label("缩放:");
                     ui.add(egui::Slider::new(&mut self.zoom, 0.5..=4.0).text("x"));
                 });
-                let avail = ui.available_size();
+                let full_avail = ui.available_size();
+                // Reserve space around the picture so the on-screen controls
+                // (nav bar below, side keys on the right) always sit fully
+                // OUTSIDE the image instead of being clipped by the viewport.
+                let side_w = (full_avail.x * 0.05).clamp(34.0, 46.0);
+                let reserve_right = side_w + 14.0; // side key column + gap
+                let reserve_bottom = side_w * 2.0 + 20.0; // nav bar height + gap
+                let avail = Vec2::new(
+                    (full_avail.x - reserve_right).max(50.0),
+                    (full_avail.y - reserve_bottom).max(50.0),
+                );
                 let scale = (avail.x / w as f32).min(avail.y / h as f32).min(self.zoom);
                 let content_size = Vec2::new(w as f32 * scale, h as f32 * scale);
-                let (viewport, resp) = ui.allocate_exact_size(avail, Sense::click_and_drag());
-                let draw_rect = Rect::from_center_size(viewport.center(), content_size);
+                let (viewport, resp) = ui.allocate_exact_size(full_avail, Sense::click_and_drag());
+                let draw_rect = Rect::from_center_size(
+                    Pos2::new(
+                        viewport.min.x + avail.x / 2.0,
+                        viewport.min.y + avail.y / 2.0,
+                    ),
+                    content_size,
+                );
 
                 ui.painter().image(
                     tex.id(),
@@ -1054,6 +1212,8 @@ impl eframe::App for UiViewerApp {
                 let side_w = (draw_rect.width() * 0.05).clamp(34.0, 46.0);
                 let side_h = side_w * 2.0;
                 // Right-hand column: end-session, power, volume+, volume-.
+                // Anchored near the TOP of the screen (like a real phone's
+                // side keys sit high) rather than vertically centered.
                 let stack: [(Icon, &str, Option<u32>); 4] = [
                     (Icon::End, "结束会话", None),
                     (Icon::Power, "电源", Some(26)),
@@ -1064,7 +1224,9 @@ impl eframe::App for UiViewerApp {
                     + spacing * (stack.len() as f32 - 1.0);
                 let max_side_x = viewport.max.x - side_w - 2.0;
                 let side_x = (draw_rect.max.x + gap).min(max_side_x);
-                let mut y = (draw_rect.center().y - total_h / 2.0)
+                // Start just below the top of the screen and grow downward,
+                // clamped so the whole column stays inside the viewport.
+                let mut y = (draw_rect.min.y + gap)
                     .clamp(viewport.min.y + 2.0, viewport.max.y - total_h - 2.0);
                 for (icon, tip, key) in stack {
                     let r = Rect::from_min_size(Pos2::new(side_x, y), Vec2::new(side_w, side_h));
