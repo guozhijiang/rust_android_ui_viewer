@@ -91,3 +91,18 @@ src/
 ├── live.rs      # scrcpy 实时会话：推送 server、拉流、控制通道、自动下载 scrcpy 包
 └── scrcpy.rs    # 动态加载 FFmpeg DLL 软解 H.264 → RGBA
 ```
+
+## 参考与出处
+
+本工具的实时操作模式与视频解码直接基于以下开源项目，协议与线格式均对照其官方源码实现：
+
+- **[scrcpy](https://github.com/Genymobile/scrcpy)**（Genymobile，Apache-2.0）
+  - 实时控制模式的核心：设备端 `scrcpy-server` 推流 + 控制通道（触摸 / 按键 / 文本 / 滚动）的线格式，均对照 scrcpy v4.0 源码（`DesktopConnection.java` / `ControlMessageReader.java`）实现。
+  - PC 端视频解码复用 scrcpy 自带的 FFmpeg（`avcodec` / `avutil`）动态库软解 H.264。
+  - 官方发布包（含 server 与 DLL）：<https://github.com/Genymobile/scrcpy/releases>
+- **[egui / eframe](https://github.com/emilk/egui)**（emilk，MIT）
+  - 全部 GUI（三栏布局、截图覆盖层、属性面板、层级树）基于 egui 即时模式框架，eframe 提供窗口与事件循环。
+- **[uiautomator](https://developer.android.com/tools/help/uiautomator)**（Android 官方）
+  - 「Capture」模式的 UI 层级来源：`adb shell uiautomator dump` 产出的控件树 XML，以及 `adb exec-out screencap -p` 截取的屏幕图像。
+- **[FFmpeg](https://ffmpeg.org/)**（LGPL/GPL）
+  - 通过 scrcpy 附带的 FFmpeg 动态库（`avcodec-62.dll` / `avutil-60.dll`，FFmpeg 7.x）完成 H.264 解码。
