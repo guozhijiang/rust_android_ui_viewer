@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-![Android UI Viewer 主界面](assets/screenshot.png)
+![Android UI Viewer 操作模式实时控制](assets/screenshot.png)
 
 ## 功能
 
