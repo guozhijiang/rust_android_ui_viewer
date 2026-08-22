@@ -11,6 +11,7 @@ quick-xml = "0.36"
 anyhow = "1"
 rfd = "0.14"
 libloading = "0.8"
+log = "0.4"
 
 [profile.release]
 opt-level = "z"

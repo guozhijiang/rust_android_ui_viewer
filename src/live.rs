@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::scrcpy::{H264Decoder, RgbaFrame};
+use crate::log::{error, info};
 
 const DEVICE_NAME_LEN: usize = 64;
 const HEADER_LEN: usize = 12;
@@ -439,12 +440,15 @@ pub fn start(
     tx: Sender<LiveEvent>,
 ) {
     thread::spawn(move || {
+        info!("live 工作线程启动");
         let result = run(&adb, &serial_hint, &scrcpy_dir_hint, max_video_size, &stop, &tx);
         match result {
             Ok(()) => {
+                info!("live 会话正常结束");
                 let _ = tx.send(LiveEvent::Stopped);
             }
             Err(e) => {
+                error!("live 会话失败: {e}");
                 let _ = tx.send(LiveEvent::Error(format!("{e}")));
             }
         }
@@ -488,8 +492,10 @@ fn run(
 
     let serial = detect_serial(adb, serial_hint)?;
     let serial_ref = serial.as_deref().unwrap_or("");
+    info!("检测到设备 serial={:?}", serial_ref);
 
     let scrcpy_dir = detect_scrcpy_dir(scrcpy_dir_hint)?;
+    info!("scrcpy 目录: {}", scrcpy_dir.display());
     let server_path = scrcpy_dir.join("scrcpy-server");
     if !server_path.is_file() {
         bail!("未找到 scrcpy-server: {}", server_path.display());
@@ -645,6 +651,10 @@ fn run(
     let _ = sock.set_nodelay(true);
     let _ = sock.set_read_timeout(Some(Duration::from_millis(250)));
     let mut stream = sock;
+    info!(
+        "视频连接已建立 (tunnel_forward={}, local_port={})",
+        tunnel_forward, local_port
+    );
 
     if tunnel_forward {
         // Server writes one dummy byte so the client can detect a bad tunnel.
@@ -683,12 +693,14 @@ fn run(
     let mut dec = match H264Decoder::try_new(&dll_dir) {
         Ok(d) => d,
         Err(e) => {
+            error!("H264 解码器初始化失败: {e}");
             kill_child(&mut child);
             cleanup_tunnel(adb, serial_ref, scid, local_port, tunnel_forward);
             stop.store(true, Ordering::Relaxed);
             return Err(e);
         }
     };
+    info!("H264 解码器初始化成功");
 
     // Set up the control channel (real-time touch/keys over scrcpy). If it
     // failed to connect we keep running video-only and fall back to adb input.
@@ -736,6 +748,7 @@ fn run(
                 vw = new_w;
                 vh = new_h;
                 dec.flush();
+                info!("视频方向/尺寸变化 → {}x{}", vw, vh);
                 let _ = tx.send(LiveEvent::Status(format!("方向/尺寸变化 → {vw}x{vh}")));
             }
             continue;

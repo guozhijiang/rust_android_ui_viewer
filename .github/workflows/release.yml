@@ -1,0 +1,59 @@
+name: Release Windows EXE
+
+# 触发条件：推送一个形如 v* 的 tag（例如 v1.0.0）时自动构建并发布
+on:
+  push:
+    tags:
+      - "v*"
+
+# 赋予 workflow 写 Release 的权限（softprops/action-gh-release 需要）
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+
+    steps:
+      # 1. 拉取源码
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. 安装 Rust 稳定工具链（windows-2022 镜像自带，但显式声明更稳）
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # 3. 缓存 cargo 依赖，加速重复构建
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # 4. 编译 release 版本（含 glow/egui + ffmpeg 软解依赖）
+      - name: Build release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      # 5. 抽取产物并打包成 zip
+      #    注意：scrcpy 的 server / FFmpeg DLL 不在 exe 内，保留运行时自动下载逻辑，
+      #    所以发布包只需 android-ui-viewer.exe 本身即可开箱即用。
+      - name: Package
+        run: |
+          $bin = "target/x86_64-pc-windows-msvc/release/android-ui-viewer.exe"
+          Compress-Archive -Path $bin -DestinationPath android-ui-viewer-windows-x64.zip
+
+      # 6. 发布到 GitHub Releases（按推送的 tag 命名）
+      #    generate_release_notes: 自动根据 commit 生成更新说明
+      - name: Publish to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: android-ui-viewer-windows-x64.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

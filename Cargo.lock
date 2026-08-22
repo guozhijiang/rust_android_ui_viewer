@@ -73,6 +73,7 @@ dependencies = [
  "egui",
  "image 0.25.10",
  "libloading",
+ "log",
  "quick-xml 0.36.2",
  "rfd",
 ]

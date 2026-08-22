@@ -50,6 +50,8 @@ cargo run           # 调试运行
 cargo build --release && ./target/release/android-ui-viewer.exe
 ```
 
+本地编译、CI 自动构建并发布 exe 到 GitHub Releases 的完整逻辑与操作步骤，见 **[BUILD_AND_RELEASE.md](BUILD_AND_RELEASE.md)**。
+
 ## 验证 / 测试
 
 实时操作模式（scrcpy 控制通道）有两层验证：

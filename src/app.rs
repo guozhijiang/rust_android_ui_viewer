@@ -160,8 +160,129 @@ pub struct UiViewerApp {
     xml_rx: Option<Receiver<anyhow::Result<String>>>,
 }
 
+/// Icons drawn with the painter so they render identically everywhere
+/// (no dependency on an emoji font being present).
+#[derive(Clone, Copy, PartialEq)]
+enum Icon {
+    Back,
+    Home,
+    Recent,
+    Power,
+    VolUp,
+    VolDown,
+    End,
+}
+
+/// Draw a 28px-ish icon centered in `rect`.
+fn draw_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
+    let c = rect.center();
+    let s = rect.width().min(rect.height());
+    let w = s * 0.12;
+    let stroke = Stroke::new(w, color);
+    let seg = |a: (f32, f32), b: (f32, f32)| {
+        p.line_segment(
+            [Pos2::new(c.x + a.0 * s, c.y + a.1 * s), Pos2::new(c.x + b.0 * s, c.y + b.1 * s)],
+            stroke,
+        );
+    };
+    match icon {
+        Icon::Back => {
+            // return / undo arrow: arrowhead points left, tail curls up on the
+            // right (like the browser/back "return" glyph ↩)
+            seg((0.34, -0.28), (0.34, 0.10)); // right tail going down
+            seg((0.34, 0.10), (0.10, 0.26)); // bottom curve
+            seg((0.10, 0.26), (-0.20, 0.20)); // continue left
+            seg((-0.20, 0.20), (-0.40, 0.20)); // shaft to arrowhead
+            seg((-0.40, 0.20), (-0.22, 0.06)); // arrowhead upper
+            seg((-0.40, 0.20), (-0.22, 0.34)); // arrowhead lower
+        }
+        Icon::Home => {
+            // roof
+            seg((-0.34, -0.02), (0.0, -0.34));
+            seg((0.0, -0.34), (0.34, -0.02));
+            // body
+            seg((-0.24, -0.02), (-0.24, 0.34));
+            seg((0.24, -0.02), (0.24, 0.34));
+            seg((-0.24, 0.34), (0.24, 0.34));
+            // door
+            seg((0.0, 0.06), (0.0, 0.34));
+        }
+        Icon::Recent => {
+            // two overlapping rounded squares (recent apps)
+            p.rect_stroke(
+                Rect::from_center_size(
+                    Pos2::new(c.x - s * 0.08, c.y - s * 0.08),
+                    Vec2::new(s * 0.42, s * 0.42),
+                ),
+                s * 0.06,
+                stroke,
+            );
+            p.rect_stroke(
+                Rect::from_center_size(
+                    Pos2::new(c.x + s * 0.08, c.y + s * 0.08),
+                    Vec2::new(s * 0.42, s * 0.42),
+                ),
+                s * 0.06,
+                stroke,
+            );
+        }
+        Icon::Power => {
+            p.circle_stroke(c, s * 0.30, stroke);
+            seg((0.0, -0.30), (0.0, -0.46));
+        }
+        Icon::VolUp | Icon::VolDown => {
+            // speaker
+            let sx = -0.20;
+            p.rect_stroke(
+                Rect::from_center_size(
+                    Pos2::new(c.x + sx * s - s * 0.10, c.y),
+                    Vec2::new(s * 0.14, s * 0.20),
+                ),
+                s * 0.02,
+                stroke,
+            );
+            seg((sx - 0.03, -0.10), (sx + 0.16, -0.22));
+            seg((sx - 0.03, 0.10), (sx + 0.16, 0.22));
+            seg((sx + 0.16, -0.22), (sx + 0.16, 0.22));
+            // plus / minus
+            if icon == Icon::VolUp {
+                seg((0.30, 0.0), (0.46, 0.0));
+                seg((0.38, -0.08), (0.38, 0.08));
+            } else {
+                seg((0.30, 0.0), (0.46, 0.0));
+            }
+        }
+        Icon::End => {
+            // phone handset (handle + ear/mouth pieces) with end-call slash
+            let a = Pos2::new(c.x - s * 0.26, c.y - s * 0.22);
+            let b = Pos2::new(c.x + s * 0.26, c.y + s * 0.22);
+            p.line_segment([a, b], Stroke::new(s * 0.16, color));
+            p.circle_filled(a, s * 0.10, color);
+            p.circle_filled(b, s * 0.10, color);
+            seg((-0.30, 0.30), (0.30, -0.30));
+        }
+    }
+}
+
+/// A clickable control button positioned at an absolute rect (outside the
+/// phone image). We paint the icon on top of a themed, empty egui button so
+/// its colors follow the current style and it gets proper hover/active states.
+fn overlay_button(ui: &mut egui::Ui, rect: Rect, icon: Icon, tooltip: &str) -> bool {
+    let resp = ui.put(rect, egui::Button::new(""));
+    let clicked = resp.clicked();
+    let visuals = ui.style().interact(&resp);
+    let icon_size = rect.width().min(rect.height()) * 0.5;
+    let icon_box = Rect::from_center_size(rect.center(), Vec2::splat(icon_size));
+    draw_icon(ui.painter(), icon_box, icon, visuals.text_color());
+    if !tooltip.is_empty() {
+        resp.on_hover_text(tooltip);
+    }
+    clicked
+}
+
 impl UiViewerApp {
     pub fn new() -> Self {
+        crate::log::info!("UiViewerApp 已创建");
         Self {
             adb_path: "adb".to_string(),
             screenshot: None,
@@ -262,6 +383,13 @@ impl UiViewerApp {
 
     /// Spawn the live scrcpy session (video stream + touch control).
     fn start_live(&mut self) {
+        crate::log::info!(
+            "启动操作会话: adb={}, serial_hint={:?}, scrcpy_dir={:?}, max_size={}",
+            self.adb_path,
+            self.live_serial_hint,
+            self.scrcpy_dir,
+            self.max_video_size
+        );
         let (tx, rx) = std::sync::mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         live::start(
@@ -280,6 +408,7 @@ impl UiViewerApp {
 
     /// Tear the live session down (the worker thread observes the stop flag).
     fn stop_live(&mut self) {
+        crate::log::info!("结束操作会话");
         if let Some(stop) = &self.live_stop {
             stop.store(true, Ordering::Relaxed);
         }
@@ -308,6 +437,7 @@ impl UiViewerApp {
     }
 
     fn send_key(&self, code: u32) {
+        crate::log::debug!("发送按键 code={}", code);
         if let Some(c) = &self.live_control {
             c.press_key(code);
         } else {
@@ -316,6 +446,7 @@ impl UiViewerApp {
     }
 
     fn send_text(&self, text: &str) {
+        crate::log::debug!("发送文本 ({} 字符)", text.chars().count());
         if let Some(c) = &self.live_control {
             c.text(text);
         } else {
@@ -327,6 +458,7 @@ impl UiViewerApp {
 
     /// Dump + load the UI hierarchy while the live session keeps running.
     fn capture_hierarchy_now(&mut self) {
+        crate::log::info!("抓取界面层级 serial={:?}", self.live_serial);
         self.status = "正在抓取界面层级…".to_string();
         let adb = self.adb_path.clone();
         let serial = self.live_serial.clone();
@@ -402,17 +534,28 @@ impl eframe::App for UiViewerApp {
                 } => {
                     self.live_size = Some((width, height));
                     self.live_control = control;
-                    if !serial.is_empty() {
-                        self.live_serial = serial;
-                    }
                     let ctrl = if self.live_control.is_some() {
                         "实时控制已就绪"
                     } else {
                         "控制通道不可用，已回退 adb"
                     };
+                    crate::log::info!(
+                        "已连接设备 {} ({}x{}) serial={:?} {}",
+                        device_name,
+                        width,
+                        height,
+                        serial,
+                        ctrl
+                    );
+                    if !serial.is_empty() {
+                        self.live_serial = serial;
+                    }
                     self.status = format!("已连接 {device_name}（{width}x{height}） · {ctrl}");
                 }
-                LiveEvent::Status(s) => self.status = s,
+                LiveEvent::Status(s) => {
+                    crate::log::debug!("会话状态: {}", s);
+                    self.status = s
+                }
                 LiveEvent::Frame(f) => {
                     let color = ColorImage::from_rgba_unmultiplied(
                         [f.width as usize, f.height as usize],
@@ -423,11 +566,13 @@ impl eframe::App for UiViewerApp {
                     self.live_size = Some((f.width, f.height));
                 }
                 LiveEvent::Error(e) => {
+                    crate::log::error!("操作会话错误: {}", e);
                     self.status = format!("操作会话错误：{e}");
                     self.stop_live();
                     ctx.request_repaint();
                 }
                 LiveEvent::Stopped => {
+                    crate::log::info!("操作会话已停止");
                     self.stop_live();
                     self.status = "操作会话已结束".to_string();
                     ctx.request_repaint();
@@ -549,26 +694,8 @@ impl eframe::App for UiViewerApp {
                 }
             });
             ui.horizontal_wrapped(|ui| {
-                ui.label("搜索:");
-                ui.text_edit_singleline(&mut self.search);
-                ui.separator();
                 if let Some((x, y)) = self.hover_pix {
                     ui.monospace(format!("坐标: ({x}, {y})"));
-                }
-                if let Some(id) = self.selected {
-                    if let Some(node) = self.tree.as_ref().and_then(|t| t.find(id)) {
-                        if let Some(b) = &node.bounds {
-                            ui.monospace(format!(
-                                "选中: [{},{}][{},{}]  ({} × {} px)",
-                                b.left,
-                                b.top,
-                                b.right,
-                                b.bottom,
-                                b.width(),
-                                b.height()
-                            ));
-                        }
-                    }
                 }
                 ui.separator();
                 ui.colored_label(Color32::from_rgb(220, 220, 220), &self.status);
@@ -601,39 +728,17 @@ impl eframe::App for UiViewerApp {
                     if ui.button("抓取层级").clicked() {
                         self.capture_hierarchy_now();
                     }
-                    ui.separator();
-                    if ui.button("返回").clicked() {
-                        self.send_key(4);
-                    }
-                    if ui.button("主页").clicked() {
-                        self.send_key(3);
-                    }
-                    if ui.button("最近").clicked() {
-                        self.send_key(187);
-                    }
-                    if ui.button("电源").clicked() {
-                        self.send_key(26);
-                    }
-                    if ui.button("音量+").clicked() {
-                        self.send_key(24);
-                    }
-                    if ui.button("音量-").clicked() {
-                        self.send_key(25);
-                    }
-                    if ui.button("结束会话").clicked() {
-                        self.stop_live();
-                        self.op_mode = false;
-                    }
                 });
             });
         }
 
         // ---- Left panel: element properties (full height, no scrolling needed) ----
-        egui::SidePanel::left("props")
-            .default_width(300.0)
-            .min_width(220.0)
-            .resizable(true)
-            .show(ctx, |ui| {
+        if !self.op_mode {
+            egui::SidePanel::left("props")
+                .default_width(300.0)
+                .min_width(220.0)
+                .resizable(true)
+                .show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.heading("元素属性");
@@ -657,6 +762,7 @@ impl eframe::App for UiViewerApp {
                         }
                     });
             });
+        }
 
         // ---- Right panel: full-height hierarchy tree ----
         egui::SidePanel::right("right")
@@ -671,6 +777,21 @@ impl eframe::App for UiViewerApp {
                         ui.weak(format!("{} 个节点", self.tree_count));
                     }
                 });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("搜索:");
+                    ui.text_edit_singleline(&mut self.search);
+                });
+                if let Some(id) = self.selected {
+                    if let Some(node) = self.tree.as_ref().and_then(|t| t.find(id)) {
+                        if let Some(b) = &node.bounds {
+                            ui.monospace(format!(
+                                "选中: [{},{}][{},{}]  ({} x {} px)",
+                                b.left, b.top, b.right, b.bottom, b.width(), b.height()
+                            ));
+                        }
+                    }
+                }
                 ui.separator();
 
                 // The tree gets the full panel height and can scroll both
@@ -748,6 +869,7 @@ impl eframe::App for UiViewerApp {
                                 start_time: Instant::now(),
                                 moved: false,
                             });
+                            crate::log::debug!("touch_down ({}, {})", d.0, d.1);
                             // Begin the touch immediately so drags are live.
                             if let Some(c) = &self.live_control {
                                 c.touch_down(d.0, d.1);
@@ -795,6 +917,18 @@ impl eframe::App for UiViewerApp {
                         } else {
                             self.adb_sh(&format!("input tap {sx} {sy}"));
                         }
+                        crate::log::debug!(
+                            "touch_up ({}, {}) moved={} elapsed_ms={} ({} 坐标)",
+                            lifted.0,
+                            lifted.1,
+                            g.moved,
+                            elapsed,
+                            if self.live_control.is_some() {
+                                "scrcpy"
+                            } else {
+                                "adb"
+                            }
+                        );
                         // Also select the tapped element in the tree (tap only).
                         if !g.moved {
                             if let Some(tree) = &self.tree {
@@ -907,6 +1041,64 @@ impl eframe::App for UiViewerApp {
                         self.hovered_tree,
                         draw_faint,
                     );
+                }
+
+                // On-screen controls placed OUTSIDE the screen image, matching a
+                // real device: power + volume on the right edge, a navigation
+                // bar just below the screen, and an end-session button. They sit
+                // in the letterbox around the picture so they never cover it, and
+                // clicks on them cannot start a tap/swipe (those only act inside
+                // draw_rect).
+                let gap = 8.0;
+                let spacing = 10.0;
+                let side_w = (draw_rect.width() * 0.05).clamp(34.0, 46.0);
+                let side_h = side_w * 2.0;
+                // Right-hand column: end-session, power, volume+, volume-.
+                let stack: [(Icon, &str, Option<u32>); 4] = [
+                    (Icon::End, "结束会话", None),
+                    (Icon::Power, "电源", Some(26)),
+                    (Icon::VolUp, "音量+", Some(24)),
+                    (Icon::VolDown, "音量-", Some(25)),
+                ];
+                let total_h = side_h * stack.len() as f32
+                    + spacing * (stack.len() as f32 - 1.0);
+                let max_side_x = viewport.max.x - side_w - 2.0;
+                let side_x = (draw_rect.max.x + gap).min(max_side_x);
+                let mut y = (draw_rect.center().y - total_h / 2.0)
+                    .clamp(viewport.min.y + 2.0, viewport.max.y - total_h - 2.0);
+                for (icon, tip, key) in stack {
+                    let r = Rect::from_min_size(Pos2::new(side_x, y), Vec2::new(side_w, side_h));
+                    if overlay_button(ui, r, icon, tip) {
+                        match key {
+                            None => {
+                                self.stop_live();
+                                self.op_mode = false;
+                            }
+                            Some(k) => self.send_key(k),
+                        }
+                    }
+                    y += side_h + spacing;
+                }
+
+                // Navigation bar just below the screen.
+                let nav_h = side_h;
+                let nav_btn_w = (draw_rect.width() * 0.18).clamp(64.0, 120.0);
+                let nav_total = nav_btn_w * 3.0 + spacing * 2.0;
+                let nav_y = (draw_rect.max.y + gap).min(viewport.max.y - nav_h - 2.0);
+                let nav_x = (draw_rect.center().x - nav_total / 2.0)
+                    .clamp(viewport.min.x + 2.0, viewport.max.x - nav_total - 2.0);
+                let nav: [(Icon, &str, u32); 3] = [
+                    (Icon::Back, "返回", 4),
+                    (Icon::Home, "主页", 3),
+                    (Icon::Recent, "最近", 187),
+                ];
+                let mut x = nav_x;
+                for (icon, tip, key) in nav {
+                    let r = Rect::from_min_size(Pos2::new(x, nav_y), Vec2::new(nav_btn_w, nav_h));
+                    if overlay_button(ui, r, icon, tip) {
+                        self.send_key(key);
+                    }
+                    x += nav_btn_w + spacing;
                 }
             } else if self.op_mode {
                 ui.centered_and_justified(|ui| {
@@ -1049,6 +1241,7 @@ impl eframe::App for UiViewerApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::log::info!("应用退出");
         self.stop_live();
     }
 }
