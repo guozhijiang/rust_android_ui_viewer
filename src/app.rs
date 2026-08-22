@@ -1,15 +1,128 @@
-use std::sync::mpsc::Receiver;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc::Receiver};
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use eframe::egui::{
     Align, Color32, ColorImage, FontData, FontDefinitions, FontFamily, Pos2, Rect, Sense, Stroke,
     TextureHandle, TextureOptions, Vec2,
 };
+use egui::PointerButton;
 
-use crate::adb::{dump_ui, capture, CaptureResult};
+use crate::adb::{dump_ui, dump_ui_serial, capture, CaptureResult};
+use crate::live::{self, LiveControl, LiveEvent};
 use crate::ui_tree::Node;
 
 const FAINT_NODE_LIMIT: usize = 2000;
+
+/// A press gesture on the live screen being tracked for tap/swipe detection.
+struct OpGest {
+    /// Device-space coordinates at press.
+    start_xy: (i32, i32),
+    start_time: Instant,
+    moved: bool,
+}
+
+/// Map an egui key to an Android KEYCODE. Returns `None` for printable keys
+/// with no modifier held, because those are forwarded as text via the
+/// control channel (so IME / casing is preserved). With a modifier held the
+/// keycode is returned so shortcuts (e.g. Ctrl+C) reach the device.
+fn android_keycode(key: egui::Key, has_mod: bool) -> Option<u32> {
+    use egui::Key::*;
+    Some(match key {
+        // Non-printable: always a keycode.
+        ArrowDown => 20,
+        ArrowLeft => 21,
+        ArrowRight => 22,
+        ArrowUp => 19,
+        Escape => 111,
+        Tab => 61,
+        Backspace => 67,
+        Enter => 66,
+        Insert => 124,
+        Delete => 112,
+        Home => 122,
+        End => 123,
+        PageUp => 92,
+        PageDown => 93,
+        F1 => 131,
+        F2 => 132,
+        F3 => 133,
+        F4 => 134,
+        F5 => 135,
+        F6 => 136,
+        F7 => 137,
+        F8 => 138,
+        F9 => 139,
+        F10 => 140,
+        F11 => 141,
+        F12 => 142,
+        // Printable: only as a keycode when a modifier is held.
+        _ => {
+            if !has_mod {
+                return None;
+            }
+            match key {
+                A => 29,
+                B => 30,
+                C => 31,
+                D => 32,
+                E => 33,
+                F => 34,
+                G => 35,
+                H => 36,
+                I => 37,
+                J => 38,
+                K => 39,
+                L => 40,
+                M => 41,
+                N => 42,
+                O => 43,
+                P => 44,
+                Q => 45,
+                R => 46,
+                S => 47,
+                T => 48,
+                U => 49,
+                V => 50,
+                W => 51,
+                X => 52,
+                Y => 53,
+                Z => 54,
+                Num0 => 7,
+                Num1 => 8,
+                Num2 => 9,
+                Num3 => 10,
+                Num4 => 11,
+                Num5 => 12,
+                Num6 => 13,
+                Num7 => 14,
+                Num8 => 15,
+                Num9 => 16,
+                _ => return None,
+            }
+        }
+    })
+}
+
+/// Android META_* flags derived from the held egui modifiers.
+fn android_meta(mods: egui::Modifiers) -> u32 {
+    let mut m = 0;
+    if mods.shift {
+        m |= 0x1; // META_SHIFT_ON
+    }
+    if mods.alt {
+        m |= 0x2; // META_ALT_ON
+    }
+    if mods.ctrl {
+        m |= 0x1000; // META_CTRL_ON
+    }
+    if mods.command || mods.mac_cmd {
+        m |= 0x10000; // META_META_ON
+    }
+    m
+}
 
 pub struct UiViewerApp {
     adb_path: String,
@@ -28,6 +141,23 @@ pub struct UiViewerApp {
     pan: Vec2,
     panning: bool,
     rx: Option<Receiver<anyhow::Result<CaptureResult>>>,
+
+    // ---- Operation (live scrcpy) mode ----
+    op_mode: bool,
+    live_started: bool,
+    live_rx: Option<Receiver<LiveEvent>>,
+    live_stop: Option<Arc<AtomicBool>>,
+    live_tex: Option<TextureHandle>,
+    live_size: Option<(u32, u32)>,
+    live_control: Option<LiveControl>,
+    live_serial: String,
+    live_serial_hint: String,
+    scrcpy_dir: String,
+    max_video_size: u32,
+    input_text: String,
+    op_gest: Option<OpGest>,
+    op_gest2: Option<OpGest>,
+    xml_rx: Option<Receiver<anyhow::Result<String>>>,
 }
 
 impl UiViewerApp {
@@ -49,6 +179,21 @@ impl UiViewerApp {
             pan: Vec2::ZERO,
             panning: false,
             rx: None,
+            op_mode: false,
+            live_started: false,
+            live_rx: None,
+            live_stop: None,
+            live_tex: None,
+            live_size: None,
+            live_control: None,
+            live_serial: String::new(),
+            live_serial_hint: String::new(),
+            scrcpy_dir: String::new(),
+            max_video_size: 0,
+            input_text: String::new(),
+            op_gest: None,
+            op_gest2: None,
+            xml_rx: None,
         }
     }
 
@@ -114,6 +259,90 @@ impl UiViewerApp {
             Err(e) => self.status = format!("XML 解析失败：{e}"),
         }
     }
+
+    /// Spawn the live scrcpy session (video stream + touch control).
+    fn start_live(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        live::start(
+            self.adb_path.clone(),
+            self.live_serial_hint.clone(),
+            self.scrcpy_dir.clone(),
+            self.max_video_size,
+            stop.clone(),
+            tx,
+        );
+        self.live_stop = Some(stop);
+        self.live_rx = Some(rx);
+        self.live_started = true;
+        self.status = "已启动操作会话…".to_string();
+    }
+
+    /// Tear the live session down (the worker thread observes the stop flag).
+    fn stop_live(&mut self) {
+        if let Some(stop) = &self.live_stop {
+            stop.store(true, Ordering::Relaxed);
+        }
+        self.live_stop = None;
+        self.live_rx = None;
+        self.live_tex = None;
+        self.live_size = None;
+        self.live_control = None;
+        self.live_serial.clear();
+        self.live_started = false;
+        self.op_gest = None;
+        self.op_gest2 = None;
+    }
+
+    /// Fire-and-forget `adb shell <cmd>` against the live device.
+    fn adb_sh(&self, cmd: &str) {
+        let mut c = Command::new(&self.adb_path);
+        if !self.live_serial.is_empty() {
+            c.arg("-s").arg(&self.live_serial);
+        }
+        let _ = c
+            .args(["shell", cmd])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+
+    fn send_key(&self, code: u32) {
+        if let Some(c) = &self.live_control {
+            c.press_key(code);
+        } else {
+            self.adb_sh(&format!("input keyevent {code}"));
+        }
+    }
+
+    fn send_text(&self, text: &str) {
+        if let Some(c) = &self.live_control {
+            c.text(text);
+        } else {
+            // `input text` needs spaces/% escaped; keep it simple and reliable.
+            let escaped = text.replace('%', "%%").replace(' ', "%s");
+            self.adb_sh(&format!("input text {escaped}"));
+        }
+    }
+
+    /// Dump + load the UI hierarchy while the live session keeps running.
+    fn capture_hierarchy_now(&mut self) {
+        self.status = "正在抓取界面层级…".to_string();
+        let adb = self.adb_path.clone();
+        let serial = self.live_serial.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.xml_rx = Some(rx);
+        std::thread::spawn(move || {
+            let res = (|| -> anyhow::Result<String> {
+                if serial.is_empty() {
+                    dump_ui(&adb)
+                } else {
+                    dump_ui_serial(&adb, &serial)
+                }
+            })();
+            let _ = tx.send(res);
+        });
+    }
 }
 
 impl eframe::App for UiViewerApp {
@@ -141,6 +370,73 @@ impl eframe::App for UiViewerApp {
                 self.capturing = false;
                 ctx.request_repaint();
             }
+        }
+
+        // Drain a pending hierarchy-only dump (op mode "grab hierarchy").
+        if let Some(rx) = &self.xml_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(xml) => self.load_xml(&xml),
+                    Err(e) => self.status = format!("层级抓取失败：{e}"),
+                }
+                self.xml_rx = None;
+                self.status = format!("{}  点击界面可操作；Ctrl+点击可选中元素。", self.status);
+                ctx.request_repaint();
+            }
+        }
+
+        // Drain live-session events (frames, status, errors).
+        let live_events: Vec<LiveEvent> = self
+            .live_rx
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        for ev in live_events {
+            match ev {
+                LiveEvent::Connected {
+                    width,
+                    height,
+                    device_name,
+                    serial,
+                    control,
+                } => {
+                    self.live_size = Some((width, height));
+                    self.live_control = control;
+                    if !serial.is_empty() {
+                        self.live_serial = serial;
+                    }
+                    let ctrl = if self.live_control.is_some() {
+                        "实时控制已就绪"
+                    } else {
+                        "控制通道不可用，已回退 adb"
+                    };
+                    self.status = format!("已连接 {device_name}（{width}x{height}） · {ctrl}");
+                }
+                LiveEvent::Status(s) => self.status = s,
+                LiveEvent::Frame(f) => {
+                    let color = ColorImage::from_rgba_unmultiplied(
+                        [f.width as usize, f.height as usize],
+                        &f.rgba,
+                    );
+                    let tex = ctx.load_texture("live_frame", color, TextureOptions::default());
+                    self.live_tex = Some(tex);
+                    self.live_size = Some((f.width, f.height));
+                }
+                LiveEvent::Error(e) => {
+                    self.status = format!("操作会话错误：{e}");
+                    self.stop_live();
+                    ctx.request_repaint();
+                }
+                LiveEvent::Stopped => {
+                    self.stop_live();
+                    self.status = "操作会话已结束".to_string();
+                    ctx.request_repaint();
+                }
+            }
+        }
+        if self.live_started {
+            // Keep the UI repainting at (roughly) the stream rate.
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
 
         // Drag & drop: image -> screenshot, xml -> hierarchy.
@@ -174,6 +470,43 @@ impl eframe::App for UiViewerApp {
 
         // ---- Top panel: actions + adb path + status ----
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
+            // Mode: static capture vs live control.
+            ui.horizontal_wrapped(|ui| {
+                let in_op = self.op_mode;
+                if ui.selectable_label(in_op, "操作模式").clicked() {
+                    if !in_op {
+                        if !self.live_started {
+                            self.start_live();
+                        }
+                        self.op_mode = true;
+                        // Drop any stale capture-mode artifacts so the live view
+                        // doesn't keep showing the previous screenshot / tree.
+                        self.screenshot = None;
+                        self.image_size = None;
+                        self.tree = None;
+                        self.tree_count = 0;
+                        self.selected = None;
+                        self.jump_to = None;
+                        self.hover_pix = None;
+                        self.xml_rx = None;
+                    }
+                }
+                if ui.selectable_label(!in_op, "抓取模式").clicked() {
+                    if in_op {
+                        self.op_mode = false;
+                        if self.live_started {
+                            self.stop_live();
+                        }
+                        // Ensure no leftover live frame lingers in the center.
+                        self.live_tex = None;
+                        self.live_size = None;
+                    }
+                }
+                ui.separator();
+                if self.live_started {
+                    ui.spinner();
+                }
+            });
             ui.horizontal_wrapped(|ui| {
                 if ui.button("📱 Capture (adb)").clicked() && !self.capturing {
                     self.start_capture();
@@ -241,6 +574,59 @@ impl eframe::App for UiViewerApp {
                 ui.colored_label(Color32::from_rgb(220, 220, 220), &self.status);
             });
         });
+
+        // ---- Bottom panel: live control quick buttons (aligned under the screen) ----
+        if self.op_mode {
+            egui::TopBottomPanel::bottom("op_controls").show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("序列号:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.live_serial_hint).desired_width(110.0),
+                    );
+                    ui.label("scrcpy 目录:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.scrcpy_dir).desired_width(160.0),
+                    );
+                    ui.label("最大尺寸:");
+                    ui.add(egui::DragValue::new(&mut self.max_video_size).clamp_range(0u32..=10000))
+                        .on_hover_text("0 = 设备原始分辨率");
+                    ui.separator();
+                    ui.label("文本输入:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.input_text).desired_width(160.0),
+                    );
+                    if ui.button("发送").clicked() && !self.input_text.trim().is_empty() {
+                        self.send_text(self.input_text.trim());
+                    }
+                    if ui.button("抓取层级").clicked() {
+                        self.capture_hierarchy_now();
+                    }
+                    ui.separator();
+                    if ui.button("返回").clicked() {
+                        self.send_key(4);
+                    }
+                    if ui.button("主页").clicked() {
+                        self.send_key(3);
+                    }
+                    if ui.button("最近").clicked() {
+                        self.send_key(187);
+                    }
+                    if ui.button("电源").clicked() {
+                        self.send_key(26);
+                    }
+                    if ui.button("音量+").clicked() {
+                        self.send_key(24);
+                    }
+                    if ui.button("音量-").clicked() {
+                        self.send_key(25);
+                    }
+                    if ui.button("结束会话").clicked() {
+                        self.stop_live();
+                        self.op_mode = false;
+                    }
+                });
+            });
+        }
 
         // ---- Left panel: element properties (full height, no scrolling needed) ----
         egui::SidePanel::left("props")
@@ -310,9 +696,223 @@ impl eframe::App for UiViewerApp {
                     });
             });
 
-        // ---- Center: screenshot + overlays (zoomable & pannable) ----
+        // ---- Center: live view (op mode) or screenshot + overlays ----
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let (Some(tex), Some((w, h))) = (&self.screenshot, self.image_size) {
+            if let (Some(tex), Some((w, h))) = (self.live_tex.as_ref(), self.live_size) {
+                ui.horizontal(|ui| {
+                    ui.label("缩放:");
+                    ui.add(egui::Slider::new(&mut self.zoom, 0.5..=4.0).text("x"));
+                });
+                let avail = ui.available_size();
+                let scale = (avail.x / w as f32).min(avail.y / h as f32).min(self.zoom);
+                let content_size = Vec2::new(w as f32 * scale, h as f32 * scale);
+                let (viewport, resp) = ui.allocate_exact_size(avail, Sense::click_and_drag());
+                let draw_rect = Rect::from_center_size(viewport.center(), content_size);
+
+                ui.painter().image(
+                    tex.id(),
+                    draw_rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+
+                // Map a pointer position to device coordinates (None if outside).
+                let to_dev = |p: Pos2| -> Option<(i32, i32)> {
+                    let local = p - draw_rect.min;
+                    if local.x < 0.0
+                        || local.y < 0.0
+                        || local.x > content_size.x
+                        || local.y > content_size.y
+                    {
+                        return None;
+                    }
+                    let ix = (local.x / scale) as i32;
+                    let iy = (local.y / scale) as i32;
+                    if ix >= 0 && iy >= 0 && ix < w as i32 && iy < h as i32 {
+                        Some((ix, iy))
+                    } else {
+                        None
+                    }
+                };
+
+                self.hover_pix = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .and_then(|p| to_dev(p));
+
+                // Gesture tracking: press -> drag (swipe) or tap / long-press.
+                if ui.input(|i| i.pointer.button_pressed(PointerButton::Primary)) {
+                    if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                        if let Some(d) = to_dev(p) {
+                            self.op_gest = Some(OpGest {
+                                start_xy: d,
+                                start_time: Instant::now(),
+                                moved: false,
+                            });
+                            // Begin the touch immediately so drags are live.
+                            if let Some(c) = &self.live_control {
+                                c.touch_down(d.0, d.1);
+                            }
+                        }
+                    }
+                }
+                if let Some(g) = &mut self.op_gest {
+                    if resp.dragged() {
+                        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                            if let Some(d) = to_dev(p) {
+                                let dx = (d.0 - g.start_xy.0).abs();
+                                let dy = (d.1 - g.start_xy.1).abs();
+                                if dx + dy > 12 {
+                                    g.moved = true;
+                                }
+                                // Forward every move for a real-time swipe.
+                                if let Some(c) = &self.live_control {
+                                    c.touch_move(d.0, d.1);
+                                }
+                            }
+                        }
+                    }
+                }
+                if ui.input(|i| i.pointer.button_released(PointerButton::Primary)) {
+                    if let Some(g) = self.op_gest.take() {
+                        let end = ui
+                            .input(|i| i.pointer.interact_pos())
+                            .and_then(|p| to_dev(p));
+                        let elapsed = g.start_time.elapsed().as_millis();
+                        let (sx, sy) = g.start_xy;
+                        let lifted = end.unwrap_or((sx, sy));
+                        if let Some(c) = &self.live_control {
+                            // Lift the pointer where it was released; the press
+                            // already happened on pointer-down, so a short hold
+                            // becomes a tap and a long hold a long-press.
+                            c.touch_up(lifted.0, lifted.1);
+                        } else if g.moved {
+                            if let Some((ex, ey)) = end {
+                                self.adb_sh(&format!("input swipe {sx} {sy} {ex} {ey} 200"));
+                            }
+                        } else if elapsed > 500 {
+                            // Long press: hold in place.
+                            self.adb_sh(&format!("input swipe {sx} {sy} {sx} {sy} 600"));
+                        } else {
+                            self.adb_sh(&format!("input tap {sx} {sy}"));
+                        }
+                        // Also select the tapped element in the tree (tap only).
+                        if !g.moved {
+                            if let Some(tree) = &self.tree {
+                                if let Some(id) = tree.hit_test(lifted.0, lifted.1) {
+                                    self.selected = Some(id);
+                                    self.jump_to = Some(id);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Secondary pointer (right button): a second finger for pinch,
+                // or a plain right-click that acts as the Back button.
+                if ui.input(|i| i.pointer.button_pressed(PointerButton::Secondary)) {
+                    if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                        if let Some(d) = to_dev(p) {
+                            self.op_gest2 = Some(OpGest {
+                                start_xy: d,
+                                start_time: Instant::now(),
+                                moved: false,
+                            });
+                            if let Some(c) = &self.live_control {
+                                c.touch_down_pid(1, d.0, d.1);
+                            }
+                        }
+                    }
+                }
+                if let Some(g) = &mut self.op_gest2 {
+                    if ui.input(|i| i.pointer.button_down(PointerButton::Secondary)) {
+                        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                            if let Some(d) = to_dev(p) {
+                                let dx = (d.0 - g.start_xy.0).abs();
+                                let dy = (d.1 - g.start_xy.1).abs();
+                                if dx + dy > 12 {
+                                    g.moved = true;
+                                }
+                                if let Some(c) = &self.live_control {
+                                    c.touch_move_pid(1, d.0, d.1);
+                                }
+                            }
+                        }
+                    }
+                }
+                if ui.input(|i| i.pointer.button_released(PointerButton::Secondary)) {
+                    if let Some(g) = self.op_gest2.take() {
+                        let end = ui
+                            .input(|i| i.pointer.interact_pos())
+                            .and_then(|p| to_dev(p));
+                        let (sx, sy) = g.start_xy;
+                        let lifted = end.unwrap_or((sx, sy));
+                        if let Some(c) = &self.live_control {
+                            c.touch_up_pid(1, lifted.0, lifted.1);
+                        } else if !g.moved {
+                            self.adb_sh(&format!("input tap {sx} {sy}"));
+                        }
+                        // A right click (no drag) acts as the Back button.
+                        if !g.moved {
+                            self.send_key(4);
+                        }
+                    }
+                }
+                // Ctrl+click -> inspect (hit test) without sending a tap.
+                let ctrl = ui.input(|i| i.modifiers.command);
+                if resp.clicked() && ctrl {
+                    if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                        if let Some((ix, iy)) = to_dev(p) {
+                            if let Some(tree) = &self.tree {
+                                if let Some(id) = tree.hit_test(ix, iy) {
+                                    self.selected = Some(id);
+                                    self.jump_to = Some(id);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Mouse wheel -> device scroll (only while hovering the phone).
+                if resp.hovered() {
+                    let mut wheel = egui::Vec2::ZERO;
+                    let events = ctx.input(|i| i.events.to_vec());
+                    for e in &events {
+                        if let egui::Event::MouseWheel { delta, .. } = e {
+                            wheel += *delta;
+                        }
+                    }
+                    if wheel.x != 0.0 || wheel.y != 0.0 {
+                        if let Some((sx, sy)) = self.hover_pix {
+                            if let Some(c) = &self.live_control {
+                                // egui convention: +y = scroll down, +x = scroll
+                                // right. scrcpy convention: +vScroll = up,
+                                // +hScroll = right. So negate y.
+                                const SCROLL_SCALE: f32 = 0.04;
+                                let v_units = -wheel.y * SCROLL_SCALE;
+                                let h_units = wheel.x * SCROLL_SCALE;
+                                c.scroll(sx, sy, h_units, v_units);
+                            }
+                        }
+                    }
+                }
+
+                // Overlay the current hierarchy (if any) on the live image.
+                if let Some(tree) = &self.tree {
+                    let draw_faint = self.tree_count < FAINT_NODE_LIMIT;
+                    draw_overlays(
+                        ui.painter(),
+                        tree,
+                        draw_rect,
+                        scale,
+                        self.selected,
+                        self.hovered_tree,
+                        draw_faint,
+                    );
+                }
+            } else if self.op_mode {
+                ui.centered_and_justified(|ui| {
+                    ui.label("操作会话启动中…（正在通过 scrcpy 获取视频流）");
+                });
+            } else if let (Some(tex), Some((w, h))) = (&self.screenshot, self.image_size) {
                 // Zoom controls
                 ui.horizontal(|ui| {
                     ui.label("缩放:");
@@ -414,6 +1014,42 @@ impl eframe::App for UiViewerApp {
                 });
             }
         });
+
+        // Physical keyboard -> device (real-time operation). Forward only while
+        // the cursor is over the live phone image, so typing in our own text
+        // fields (search box, send-text) is unaffected.
+        if self.op_mode {
+            if let Some(ctrl) = &self.live_control {
+                if self.hover_pix.is_some() {
+                    let mods = ctx.input(|i| i.modifiers);
+                    let meta = android_meta(mods);
+                    // A "shortcut" is Ctrl / Cmd / Win held: route letters as
+                    // keycodes so combinations (e.g. Ctrl+C) reach the device.
+                    // Shift/Alt alone route through text input instead.
+                    let is_shortcut = mods.ctrl || mods.command || mods.mac_cmd;
+                    for ev in ctx.input(|i| i.events.clone()) {
+                        match ev {
+                            egui::Event::Key { key, pressed, .. } => {
+                                if let Some(code) = android_keycode(key, is_shortcut) {
+                                    if pressed {
+                                        ctrl.key_down_meta(code, meta);
+                                    } else {
+                                        ctrl.key_up_meta(code, meta);
+                                    }
+                                }
+                            }
+                            egui::Event::Text(t) => ctrl.text(&t),
+                            egui::Event::Paste(t) => ctrl.text(&t),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.stop_live();
     }
 }
 

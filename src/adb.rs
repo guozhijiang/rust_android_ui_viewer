@@ -27,6 +27,47 @@ pub fn capture(adb: &str) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// Same as `dump_ui`, but targets a specific device serial (`adb -s <serial>`).
+pub fn dump_ui_serial(adb: &str, serial: &str) -> Result<String> {
+    let run = |args: &str| -> Result<std::process::Output> {
+        let mut c = Command::new(adb);
+        if !serial.is_empty() {
+            c.arg("-s").arg(serial);
+        }
+        c.args(args.split_whitespace());
+        c.output().map_err(|e| anyhow!("unable to run adb ({}): {}", adb, e))
+    };
+
+    let dump = run("shell uiautomator dump /data/local/tmp/window_dump.xml")?;
+    if !dump.status.success() {
+        return Err(anyhow!(
+            "uiautomator dump failed: {}",
+            String::from_utf8_lossy(&dump.stderr)
+        ));
+    }
+
+    let cat = run("exec-out cat /data/local/tmp/window_dump.xml")?;
+    if !cat.status.success() {
+        return Err(anyhow!(
+            "read dump file failed: {}",
+            String::from_utf8_lossy(&cat.stderr)
+        ));
+    }
+
+    // Best-effort cleanup of the temp file on device.
+    let _ = run("shell rm -f /data/local/tmp/window_dump.xml");
+
+    let s = String::from_utf8_lossy(&cat.stdout);
+    let start = s
+        .find("<?xml")
+        .ok_or_else(|| anyhow!("dump output has no XML; is the device connected?"))?;
+    let end = s
+        .rfind("</hierarchy>")
+        .ok_or_else(|| anyhow!("dump output is malformed; missing closing tag"))?
+        + "</hierarchy>".len();
+    Ok(s[start..end].to_string())
+}
+
 /// Dump the current UI hierarchy via `uiautomator dump`, reading the XML back.
 ///
 /// We dump to `/data/local/tmp` (writable by shell without storage permission),

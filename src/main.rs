@@ -1,6 +1,4 @@
-mod adb;
-mod ui_tree;
-mod app;
+use android_ui_viewer::app;
 
 use eframe::egui;
 
