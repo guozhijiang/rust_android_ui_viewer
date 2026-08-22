@@ -130,6 +130,10 @@ pub struct UiViewerApp {
     adb_path: String,
     screenshot: Option<TextureHandle>,
     image_size: Option<(u32, u32)>,
+    /// Raw bytes of the last loaded/captured screenshot (for "保存").
+    last_screenshot: Option<Vec<u8>>,
+    /// Raw XML of the last loaded/captured hierarchy (for "保存").
+    last_xml: Option<String>,
     tree: Option<Node>,
     tree_count: usize,
     selected: Option<usize>,
@@ -144,8 +148,13 @@ pub struct UiViewerApp {
     panning: bool,
     rx: Option<Receiver<anyhow::Result<CaptureResult>>>,
 
-    // ---- Operation (live scrcpy) mode ----
+    // ---- Mode: exclusive "view UI" (dump inspection) vs "operate" (live
+    // scrcpy). Only one is active at a time, but switching is a single toggle
+    // and does not discard the other side's state. ----
     op_mode: bool,
+    /// Ensures the view-mode auto-capture fires only once (so a failed capture
+    /// doesn't spin up a new background thread every frame).
+    auto_captured: bool,
     live_started: bool,
     live_rx: Option<Receiver<LiveEvent>>,
     live_stop: Option<Arc<AtomicBool>>,
@@ -329,13 +338,15 @@ impl UiViewerApp {
             adb_path: "adb".to_string(),
             screenshot: None,
             image_size: None,
+            last_screenshot: None,
+            last_xml: None,
             tree: None,
             tree_count: 0,
             selected: None,
             hovered_tree: None,
             hover_pix: None,
             search: String::new(),
-            status: "就绪。在 “UI树查看” 模式下点击 “Capture (adb)” 抓取设备界面，或把截图/XML 拖入窗口。".to_string(),
+            status: "就绪。点击 “Capture (adb)” 抓取设备界面，或点击「启动操作会话」实时操作设备；把截图/XML 拖入窗口也可加载。".to_string(),
             capturing: false,
             zoom: 1.0,
             jump_to: None,
@@ -343,6 +354,7 @@ impl UiViewerApp {
             panning: false,
             rx: None,
             op_mode: false,
+            auto_captured: false,
             live_started: false,
             live_rx: None,
             live_stop: None,
@@ -393,6 +405,7 @@ impl UiViewerApp {
         let tex = ctx.load_texture("screenshot", color, TextureOptions::default());
         self.screenshot = Some(tex);
         self.image_size = Some((w, h));
+        self.last_screenshot = Some(bytes.to_vec());
         Ok(())
     }
 
@@ -432,6 +445,7 @@ impl UiViewerApp {
     }
 
     fn load_xml(&mut self, xml: &str) {
+        self.last_xml = Some(xml.to_string());
         match crate::ui_tree::parse(xml) {
             Ok(tree) => {
                 self.tree_count = tree.count();
@@ -441,6 +455,68 @@ impl UiViewerApp {
                 self.status = format!("已加载层级，共 {} 个节点。", self.tree_count);
             }
             Err(e) => self.status = format!("XML 解析失败：{e}"),
+        }
+    }
+
+    /// Save the current screenshot + hierarchy to `<name>.png` and `<name>.xml`.
+    fn save_dump(&mut self) {
+        let (bytes, xml) = match (self.last_screenshot.as_ref(), self.last_xml.as_ref()) {
+            (Some(b), Some(x)) => (b, x),
+            _ => {
+                self.status = "没有可保存的截图/XML（请先抓取或加载）。".to_string();
+                return;
+            }
+        };
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name("dump")
+            .save_file()
+        {
+            let img_path = path.with_extension("png");
+            let xml_path = path.with_extension("xml");
+            let mut ok = true;
+            if let Err(e) = std::fs::write(&img_path, bytes) {
+                self.status = format!("保存截图失败：{e}");
+                ok = false;
+            }
+            if let Err(e) = std::fs::write(&xml_path, xml) {
+                self.status = format!("保存 XML 失败：{e}");
+                ok = false;
+            }
+            if ok {
+                self.status = format!(
+                    "已保存：{} 和 {}",
+                    img_path.display(),
+                    xml_path.display()
+                );
+            }
+        }
+    }
+
+    /// Load a screenshot file and its matching XML hierarchy (two pickers).
+    fn load_dump(&mut self, ctx: &egui::Context) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Image", &["png", "jpg", "jpeg"])
+            .pick_file()
+        {
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    if let Err(e) = self.load_screenshot(ctx, &bytes) {
+                        self.status = format!("图片加载失败：{e}");
+                    } else {
+                        self.status = format!("已加载截图：{}", path.display());
+                    }
+                }
+                Err(e) => self.status = format!("读取图片失败：{e}"),
+            }
+        }
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("XML", &["xml"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&path) {
+                Ok(s) => self.load_xml(&s),
+                Err(e) => self.status = format!("读取 XML 失败：{e}"),
+            }
         }
     }
 
@@ -558,6 +634,14 @@ impl eframe::App for UiViewerApp {
         // Consume a pending "jump to selected node" request (set on the previous
         // frame when an element was selected). `jump` drives this frame's scroll.
         let jump = self.jump_to.take();
+
+        // In "查看 UI" mode, auto-capture the screen + hierarchy on first entry
+        // (and whenever nothing is loaded yet) so inspection works immediately
+        // without a separate Capture click.
+        if !self.op_mode && self.tree.is_none() && !self.capturing && !self.auto_captured {
+            self.auto_captured = true;
+            self.start_capture();
+        }
 
         // Tree-hover highlight is recomputed every frame.
         self.hovered_tree = None;
@@ -691,103 +775,19 @@ impl eframe::App for UiViewerApp {
 
         // ---- Top panel: actions + adb path + status ----
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            // Mode: UI tree viewer (static screenshot + hierarchy) vs live control.
             ui.horizontal_wrapped(|ui| {
-                let in_op = self.op_mode;
-                if ui.selectable_label(in_op, "操作模式").clicked() {
-                    if !in_op {
-                        self.refresh_devices();
-                        // Decide whether to auto-connect. With multiple devices we
-                        // must let the user pick one first (the bottom panel shows
-                        // the device dropdown + a "连接" button).
-                        let auto_connect = if self.devices.is_empty() {
-                            true // no device: still try; live will report the error
-                        } else if self.devices.len() == 1 {
-                            self.live_serial_hint = self.devices[0].clone();
-                            true
-                        } else if !self.live_serial_hint.is_empty()
-                            && self.devices.iter().any(|d| d == &self.live_serial_hint)
-                        {
-                            true // a valid device is already selected
-                        } else {
-                            self.status =
-                                "检测到多台设备，请在下方选择目标设备后点击「连接」。"
-                                    .to_string();
-                            false
-                        };
-                        if auto_connect && !self.live_started {
-                            self.start_live();
-                        }
-                        self.op_mode = true;
-                        // Drop any stale capture-mode artifacts so the live view
-                        // doesn't keep showing the previous screenshot / tree.
-                        self.screenshot = None;
-                        self.image_size = None;
-                        self.tree = None;
-                        self.tree_count = 0;
-                        self.selected = None;
-                        self.jump_to = None;
-                        self.hover_pix = None;
-                        self.xml_rx = None;
-                    }
+                // Grabbing is automatic when entering "查看 UI", so the top bar
+                // only needs Save (keep screenshot + XML) and Load (screenshot + XML).
+                if ui.button("保持截图和XML").clicked() {
+                    self.save_dump();
                 }
-                if ui.selectable_label(!in_op, "UI树查看").clicked() {
-                    if in_op {
-                        self.op_mode = false;
-                        if self.live_started {
-                            self.stop_live();
-                        }
-                        // Ensure no leftover live frame lingers in the center.
-                        self.live_tex = None;
-                        self.live_size = None;
-                    }
+                if ui.button("加载截图和XML").clicked() {
+                    self.load_dump(ctx);
                 }
                 ui.separator();
-                if self.live_started {
-                    ui.spinner();
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                // Screenshot / XML capture & load — and the ADB path they need —
-                // are only meaningful in the "UI树查看" mode; in live control mode
-                // they'd conflict with the streaming view, so they're hidden there.
-                if !self.op_mode {
-                    if ui.button("📱 Capture (adb)").clicked() && !self.capturing {
-                        self.start_capture();
-                    }
-                    if ui.button("🖼 Load Screenshot").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Image", &["png", "jpg", "jpeg"])
-                            .pick_file()
-                        {
-                            match std::fs::read(&path) {
-                                Ok(bytes) => {
-                                    if let Err(e) = self.load_screenshot(ctx, &bytes) {
-                                        self.status = format!("图片加载失败：{e}");
-                                    } else {
-                                        self.status = format!("已加载截图：{}", path.display());
-                                    }
-                                }
-                                Err(e) => self.status = format!("读取图片失败：{e}"),
-                            }
-                        }
-                    }
-                    if ui.button("🌳 Load XML").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("XML", &["xml"])
-                            .pick_file()
-                        {
-                            match std::fs::read_to_string(&path) {
-                                Ok(s) => self.load_xml(&s),
-                                Err(e) => self.status = format!("读取 XML 失败：{e}"),
-                            }
-                        }
-                    }
-                    ui.separator();
-                    ui.label("ADB 路径:");
-                    ui.text_edit_singleline(&mut self.adb_path);
-                    ui.separator();
-                }
+                ui.label("ADB 路径:");
+                ui.text_edit_singleline(&mut self.adb_path);
+                ui.separator();
                 if self.capturing {
                     ui.spinner();
                     ui.label("抓取中…");
@@ -802,11 +802,11 @@ impl eframe::App for UiViewerApp {
             });
         });
 
-        // ---- Bottom panel: live control quick buttons (aligned under the screen) ----
-        if self.op_mode {
-            egui::TopBottomPanel::bottom("op_controls").show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("设备:");
+        // ---- Bottom panel: live control quick buttons (always shown so the
+        // session can be started/stopped and configured at any time) ----
+        egui::TopBottomPanel::bottom("op_controls").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("设备:");
                     let sel_text = if self.live_serial_hint.is_empty() {
                         "<选择设备>".to_string()
                     } else {
@@ -872,15 +872,14 @@ impl eframe::App for UiViewerApp {
                     }
                 });
             });
-        }
 
-        // ---- Left panel: element properties (full height, no scrolling needed) ----
-        if !self.op_mode {
-            egui::SidePanel::left("props")
-                .default_width(300.0)
-                .min_width(220.0)
-                .resizable(true)
-                .show(ctx, |ui| {
+        // ---- Left panel: element properties (always present so the layout
+        // width is constant; content hidden in operate mode) ----
+        egui::SidePanel::left("props")
+            .default_width(300.0)
+            .min_width(220.0)
+            .resizable(true)
+            .show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.heading("元素属性");
@@ -888,6 +887,13 @@ impl eframe::App for UiViewerApp {
                         ui.weak(format!("id = {id}"));
                     }
                 });
+                if self.op_mode {
+                    ui.separator();
+                    ui.centered_and_justified(|ui| {
+                        ui.label("操作模式下不显示元素属性");
+                    });
+                    return;
+                }
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .id_source("element_props")
@@ -904,9 +910,9 @@ impl eframe::App for UiViewerApp {
                         }
                     });
             });
-        }
 
-        // ---- Right panel: full-height hierarchy tree ----
+        // ---- Right panel: full-height hierarchy tree (always present so the
+        // layout width is constant; content hidden in operate mode) ----
         egui::SidePanel::right("right")
             .default_width(560.0)
             .min_width(340.0)
@@ -919,6 +925,13 @@ impl eframe::App for UiViewerApp {
                         ui.weak(format!("{} 个节点", self.tree_count));
                     }
                 });
+                if self.op_mode {
+                    ui.separator();
+                    ui.centered_and_justified(|ui| {
+                        ui.label("操作模式下不显示 UI 节点树");
+                    });
+                    return;
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("搜索:");
@@ -959,31 +972,90 @@ impl eframe::App for UiViewerApp {
                     });
             });
 
-        // ---- Center: live view (op mode) or screenshot + overlays ----
+        // ---- Center: mode strip + live view (op mode) or screenshot + overlays ----
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let (Some(tex), Some((w, h))) = (self.live_tex.as_ref(), self.live_size) {
-                ui.horizontal(|ui| {
-                    ui.label("缩放:");
-                    ui.add(egui::Slider::new(&mut self.zoom, 0.5..=4.0).text("x"));
-                });
-                let full_avail = ui.available_size();
-                // Reserve space around the picture so the on-screen controls
-                // (nav bar below, side keys on the right) always sit fully
-                // OUTSIDE the image instead of being clipped by the viewport.
-                let side_w = (full_avail.x * 0.05).clamp(34.0, 46.0);
-                let reserve_right = side_w + 14.0; // side key column + gap
-                let reserve_bottom = side_w * 2.0 + 20.0; // nav bar height + gap
-                let avail = Vec2::new(
-                    (full_avail.x - reserve_right).max(50.0),
-                    (full_avail.y - reserve_bottom).max(50.0),
-                );
-                let scale = (avail.x / w as f32).min(avail.y / h as f32).min(self.zoom);
+            // Mode selector sits directly above the image. Picking "查看 UI"
+            // immediately captures the screen + hierarchy (no separate Capture
+            // click needed); picking "操作设备" starts the live control session.
+            // One compact toolbar directly above the picture: mode switch + zoom.
+            // Because the side panels are always shown, this toolbar keeps a
+            // constant width and the buttons never jump when switching modes.
+            ui.horizontal_wrapped(|ui| {
+                ui.label("模式:");
+                if ui.selectable_label(!self.op_mode, "查看 UI").clicked() {
+                    // Always re-capture on (re)entering view mode: the device
+                    // screen may have changed while operating, so refresh the
+                    // screenshot + hierarchy instead of reusing the stale dump.
+                    self.op_mode = false;
+                    if !self.capturing {
+                        self.start_capture();
+                    }
+                }
+                if ui.selectable_label(self.op_mode, "操作设备").clicked() {
+                    if !self.op_mode {
+                        self.op_mode = true;
+                        if !self.live_started {
+                            self.refresh_devices();
+                            let auto_connect = if self.devices.is_empty() {
+                                true
+                            } else if self.devices.len() == 1 {
+                                self.live_serial_hint = self.devices[0].clone();
+                                true
+                            } else if !self.live_serial_hint.is_empty()
+                                && self.devices.iter().any(|d| d == &self.live_serial_hint)
+                            {
+                                true
+                            } else {
+                                self.status =
+                                    "检测到多台设备，请在下方选择目标设备后点击「连接」。"
+                                        .to_string();
+                                false
+                            };
+                            if auto_connect {
+                                self.start_live();
+                            }
+                        }
+                    }
+                }
+                ui.separator();
+                ui.label("缩放:");
+                ui.add(egui::Slider::new(&mut self.zoom, 0.5..=4.0).text("x"));
+                if !self.op_mode && ui.button("适配").clicked() {
+                    self.zoom = 1.0;
+                }
+                ui.separator();
+                if self.live_started {
+                    ui.spinner();
+                } else if self.capturing {
+                    ui.spinner();
+                }
+            });
+
+            // Both modes share the SAME image geometry: identical letterbox
+            // reserves and scale formula, so flipping between "查看 UI" and
+            // "操作设备" never makes the picture jump or resize.
+            let full_avail = ui.available_size();
+            let side_w = (full_avail.x * 0.05).clamp(34.0, 46.0);
+            let reserve_right = side_w + 14.0;
+            let reserve_bottom = side_w * 2.0 + 20.0;
+            let avail = Vec2::new(
+                (full_avail.x - reserve_right).max(50.0),
+                (full_avail.y - reserve_bottom).max(50.0),
+            );
+
+            // In "操作设备" mode the center shows the live stream and forwards
+            // touch/key input to the device; no hierarchy overlay or inspection.
+            if self.op_mode {
+                if let (Some(tex), Some((w, h))) = (self.live_tex.as_ref(), self.live_size) {
+                let scale = (avail.x / w as f32).min(avail.y / h as f32) * self.zoom;
                 let content_size = Vec2::new(w as f32 * scale, h as f32 * scale);
                 let (viewport, resp) = ui.allocate_exact_size(full_avail, Sense::click_and_drag());
-                let draw_rect = Rect::from_center_size(
+                // Top-align the picture so the mode bar sits directly above it
+                // (no vertical centering gap); horizontal centering is unchanged.
+                let draw_rect = Rect::from_min_size(
                     Pos2::new(
-                        viewport.min.x + avail.x / 2.0,
-                        viewport.min.y + avail.y / 2.0,
+                        viewport.min.x + (avail.x - content_size.x) / 2.0,
+                        viewport.min.y,
                     ),
                     content_size,
                 );
@@ -1087,15 +1159,6 @@ impl eframe::App for UiViewerApp {
                                 "adb"
                             }
                         );
-                        // Also select the tapped element in the tree (tap only).
-                        if !g.moved {
-                            if let Some(tree) = &self.tree {
-                                if let Some(id) = tree.hit_test(lifted.0, lifted.1) {
-                                    self.selected = Some(id);
-                                    self.jump_to = Some(id);
-                                }
-                            }
-                        }
                     }
                 }
                 // Secondary pointer (right button): a second finger for pinch,
@@ -1148,21 +1211,6 @@ impl eframe::App for UiViewerApp {
                         }
                     }
                 }
-                // Ctrl+click -> inspect (hit test) without sending a tap.
-                let ctrl = ui.input(|i| i.modifiers.command);
-                if resp.clicked() && ctrl {
-                    if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
-                        if let Some((ix, iy)) = to_dev(p) {
-                            if let Some(tree) = &self.tree {
-                                if let Some(id) = tree.hit_test(ix, iy) {
-                                    self.selected = Some(id);
-                                    self.jump_to = Some(id);
-                                }
-                            }
-                        }
-                    }
-                }
-
                 // Mouse wheel -> device scroll (only while hovering the phone).
                 if resp.hovered() {
                     let mut wheel = egui::Vec2::ZERO;
@@ -1187,19 +1235,9 @@ impl eframe::App for UiViewerApp {
                     }
                 }
 
-                // Overlay the current hierarchy (if any) on the live image.
-                if let Some(tree) = &self.tree {
-                    let draw_faint = self.tree_count < FAINT_NODE_LIMIT;
-                    draw_overlays(
-                        ui.painter(),
-                        tree,
-                        draw_rect,
-                        scale,
-                        self.selected,
-                        self.hovered_tree,
-                        draw_faint,
-                    );
-                }
+                // In operate mode the live image is shown bare (no hierarchy
+                // overlay) so touches map 1:1 to the device and there is no
+                // inspection framing confusing the operator.
 
                 // On-screen controls placed OUTSIDE the screen image, matching a
                 // real device: power + volume on the right edge, a navigation
@@ -1262,38 +1300,34 @@ impl eframe::App for UiViewerApp {
                     }
                     x += nav_btn_w + spacing;
                 }
-            } else if self.op_mode {
+            } else if self.live_started {
                 ui.centered_and_justified(|ui| {
                     ui.label("操作会话启动中…（正在通过 scrcpy 获取视频流）");
                 });
-            } else if let (Some(tex), Some((w, h))) = (&self.screenshot, self.image_size) {
-                // Zoom controls
-                ui.horizontal(|ui| {
-                    ui.label("缩放:");
-                    ui.add(egui::Slider::new(&mut self.zoom, 0.25..=5.0).text("x"));
-                    if ui.button("适配").clicked() {
-                        self.zoom = 1.0;
-                    }
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("尚未启动操作会话。");
                 });
-
-                let viewport_avail = ui.available_size();
-                let base = (viewport_avail.x / w as f32).min(viewport_avail.y / h as f32);
-                let scale = base * self.zoom;
+            }
+        } else if let (Some(tex), Some((w, h))) = (&self.screenshot, self.image_size) {
+                let scale = (avail.x / w as f32).min(avail.y / h as f32) * self.zoom;
                 let content_size = Vec2::new(w as f32 * scale, h as f32 * scale);
 
                 let (viewport, resp) =
-                    ui.allocate_exact_size(viewport_avail, Sense::click_and_drag());
+                    ui.allocate_exact_size(full_avail, Sense::click_and_drag());
 
                 // Pan: at fit zoom the image is centered; when zoomed in the user
                 // can drag to pan (clamped so it can't be lost off-screen).
                 if self.zoom <= 1.001 {
-                    self.pan = (viewport.size() - content_size) * 0.5;
+                    // Top-align so the mode bar is directly above the image;
+                    // horizontal centering matches the operate mode.
+                    self.pan = Vec2::new((avail.x - content_size.x) / 2.0, 0.0);
                 } else {
                     if resp.drag_started() {
                         self.panning = true;
                     }
                     self.pan += resp.drag_delta();
-                    let min_pan = viewport.size() - content_size;
+                    let min_pan = avail - content_size;
                     self.pan.x = self.pan.x.clamp(min_pan.x.min(0.0), 0.0);
                     self.pan.y = self.pan.y.clamp(min_pan.y.min(0.0), 0.0);
                 }
@@ -1337,8 +1371,9 @@ impl eframe::App for UiViewerApp {
                         if let Some(b) = &node.bounds {
                             let cx = (b.left + b.right) as f32 * 0.5 * scale;
                             let cy = (b.top + b.bottom) as f32 * 0.5 * scale;
-                            self.pan = viewport.center() - (draw_rect.min + Vec2::new(cx, cy));
-                            let min_pan = viewport.size() - content_size;
+                            self.pan =
+                                (viewport.min + avail / 2.0) - (draw_rect.min + Vec2::new(cx, cy));
+                            let min_pan = avail - content_size;
                             self.pan.x = self.pan.x.clamp(min_pan.x.min(0.0), 0.0);
                             self.pan.y = self.pan.y.clamp(min_pan.y.min(0.0), 0.0);
                         }
@@ -1369,9 +1404,9 @@ impl eframe::App for UiViewerApp {
             }
         });
 
-        // Physical keyboard -> device (real-time operation). Forward only while
-        // the cursor is over the live phone image, so typing in our own text
-        // fields (search box, send-text) is unaffected.
+        // Physical keyboard -> device (real-time operation). Forward only in
+        // operate mode, and only while the cursor is over the live phone image,
+        // so typing in our own text fields is unaffected.
         if self.op_mode {
             if let Some(ctrl) = &self.live_control {
                 if self.hover_pix.is_some() {
