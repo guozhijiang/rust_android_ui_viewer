@@ -713,7 +713,7 @@ fn run(
         serial: serial_ref.to_string(),
         control: control.clone(),
     });
-    let _ = tx.send(LiveEvent::Status(format!("已连接 {vw}×{vh}")));
+    let _ = tx.send(LiveEvent::Status(format!("已连接 {vw}x{vh}")));
 
     // Frame loop.
     let mut pending_config: Option<Vec<u8>> = None;
@@ -736,7 +736,7 @@ fn run(
                 vw = new_w;
                 vh = new_h;
                 dec.flush();
-                let _ = tx.send(LiveEvent::Status(format!("方向/尺寸变化 → {vw}×{vh}")));
+                let _ = tx.send(LiveEvent::Status(format!("方向/尺寸变化 → {vw}x{vh}")));
             }
             continue;
         }
