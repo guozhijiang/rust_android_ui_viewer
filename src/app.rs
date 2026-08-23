@@ -237,6 +237,9 @@ pub struct UiViewerApp {
     /// Set once the initial configuration (adb path + a target device) is done.
     /// Until then the main features/pages stay disabled behind a setup screen.
     configured: bool,
+    /// One-shot flag set when the user finishes config via the "完成配置并进入"
+    /// button, so the config window closes exactly once (and can be reopened later).
+    config_just_completed: bool,
     /// Throttle for the background hierarchy refresh done while recording so each
     /// gesture resolves to a real element instead of an empty selector.
     last_hier: Option<Instant>,
@@ -463,6 +466,7 @@ impl UiViewerApp {
             replay_speed: 1.0,
             show_config: true,
             configured: false,
+            config_just_completed: false,
             last_hier: None,
             hier_quiet: false,
             replay_current: None,
@@ -1254,15 +1258,22 @@ impl eframe::App for UiViewerApp {
                     if ui.add_enabled(ready, btn).clicked() {
                         self.refresh_devices();
                         self.configured = true;
+                        self.config_just_completed = true;
                         self.status = "配置完成，可以开始使用了。".to_string();
                     }
                     if !ready {
                         ui.label("请先设置 ADB 路径，并在「刷新」后选择/连接一台设备。");
                     }
                 });
-            // Once configured, keep the window closed; otherwise mirror the
-            // window's own open/close state (e.g. the X button).
-            self.show_config = if self.configured { false } else { cfg_open };
+            // Close the window precisely when the user finished config; otherwise
+            // mirror the window's own open/close state (so it can be reopened any
+            // time via the ⚙ 配置 button and closed again via X).
+            if self.config_just_completed {
+                self.show_config = false;
+                self.config_just_completed = false;
+            } else {
+                self.show_config = cfg_open;
+            }
         }
 
         // ---- Left panel: element properties (always present so the layout
