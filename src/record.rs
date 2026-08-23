@@ -143,7 +143,7 @@ pub fn build_selector(node: &Node) -> UiSelector {
     }
 }
 
-fn node_matches(n: &Node, sel: &UiSelector) -> bool {
+pub fn node_matches(n: &Node, sel: &UiSelector) -> bool {
     if let Some(r) = &sel.resource_id {
         if n.attrs.get("resource-id") != Some(r) {
             return false;
@@ -218,7 +218,7 @@ fn adb_input(adb_path: &str, serial: &str, args: &[String]) {
 }
 
 /// Best-effort device screen size; falls back to 1080x1920.
-fn screen_size(adb_path: &str, serial: &str) -> (u32, u32) {
+pub fn screen_size(adb_path: &str, serial: &str) -> (u32, u32) {
     let mut c = adb(adb_path, serial);
     c.args(["shell", "wm", "size"]);
     if let Ok(out) = c.output() {
@@ -258,11 +258,15 @@ pub enum ReplayMsg {
     Done,
 }
 
-/// Resolve a selector to device coordinates, re-dumping the UI tree a few times
+/// Resolve a selector to device coordinates, re-fetching the UI tree a few times
 /// so the action waits for the expected screen. Falls back to fractional coords.
 /// The bool is `true` when the selector matched (so callers can flag a failure
 /// when an expected element was not found).
-fn resolve(
+///
+/// To keep replay fast, once a hierarchy is successfully fetched but the element
+/// is still absent we only wait a couple more short intervals (the screen may be
+/// mid-transition) and then stop, instead of hammering `tries` full retries.
+pub fn resolve(
     adb_path: &str,
     serial: &str,
     u2: Option<&crate::u2::U2>,
@@ -273,20 +277,30 @@ fn resolve(
     tries: usize,
 ) -> (Option<(i32, i32)>, bool) {
     if let Some(sel) = sel {
-        for _ in 0..tries {
-            if let Ok(xml) = crate::u2::fetch_hierarchy(adb_path, serial, u2, 1200) {
-                if let Ok(tree) = parse(&xml) {
+        for attempt in 0..tries {
+            let fetched = crate::u2::fetch_hierarchy(adb_path, serial, u2, 1200)
+                .ok()
+                .and_then(|xml| parse(&xml).ok());
+            match fetched {
+                Some(tree) => {
                     if let Some(c) = find_center(&tree, sel) {
                         return (Some(c), true);
                     }
+                    // Screen loaded but element not present: a few short retries
+                    // cover animations/transitions, then give up.
+                    if attempt >= 3 {
+                        break;
+                    }
                 }
+                None => {}
             }
-            std::thread::sleep(Duration::from_millis(700));
+            std::thread::sleep(Duration::from_millis(400));
         }
         // Selector existed but never matched: report the fallback coords.
-        return (Some(((fx * size.0 as f32) as i32, (fy * size.1 as f32) as i32)), false);
+        (Some(((fx * size.0 as f32) as i32, (fy * size.1 as f32) as i32)), false)
+    } else {
+        (Some(((fx * size.0 as f32) as i32, (fy * size.1 as f32) as i32)), true)
     }
-    (Some(((fx * size.0 as f32) as i32, (fy * size.1 as f32) as i32)), true)
 }
 
 /// Replay recorded steps on the device. Progress is reported via `status` so the

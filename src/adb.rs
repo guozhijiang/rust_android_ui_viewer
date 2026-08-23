@@ -556,13 +556,17 @@ pub fn dump_ui(adb: &str) -> Result<String> {
 
 /// Best-effort: return the foreground app's `(package, activity)`.
 /// Used only to annotate recording steps with context.
+///
+/// Note: we run a bare `dumpsys window` and parse the `mCurrentFocus=` line
+/// *locally* rather than relying on a device-side `| grep`, because many
+/// devices lack `grep` in their shell or handle the pipe differently.
 pub fn current_app(adb: &str, serial: &str) -> Option<(String, String)> {
     let mut c = Command::new(adb);
     hide_console(&mut c);
     if !serial.is_empty() {
         c.arg("-s").arg(serial);
     }
-    c.args(["shell", "dumpsys", "window", "|", "grep", "mCurrentFocus"]);
+    c.args(["shell", "dumpsys", "window"]);
     let out = c.output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     for line in text.lines() {

@@ -270,6 +270,10 @@ pub struct UiViewerApp {
     /// When set, the next hierarchy result should not overwrite the status line
     /// (used for the quiet background refresh during recording).
     hier_quiet: bool,
+    /// Cached foreground app/activity for recording-step annotation, refreshed
+    /// at most once per ~1.5s to avoid an `adb` call per recorded action.
+    cached_app: Option<(String, String)>,
+    cached_app_at: Option<Instant>,
     /// Index of the step currently being replayed (for list highlighting).
     replay_current: Option<usize>,
     /// Indices of replay steps that failed to resolve on the device.
@@ -583,6 +587,8 @@ impl UiViewerApp {
             config_just_completed: false,
             last_hier: None,
             hier_quiet: false,
+            cached_app: None,
+            cached_app_at: None,
             replay_current: None,
             replay_failed: Vec::new(),
             pan_tab: "设备".to_string(),
@@ -740,8 +746,18 @@ impl UiViewerApp {
     /// Whether the essentials for using the app are configured: an ADB path
     /// and a target device (either already selected or detected on the bus).
     fn config_ready(&self) -> bool {
-        !self.adb_path.trim().is_empty()
-            && (!self.live_serial_hint.trim().is_empty() || !self.devices.is_empty())
+        let adb = self.adb_path.trim();
+        if adb.is_empty() {
+            return false;
+        }
+        // For an absolute path, make sure the binary actually exists before
+        // allowing "完成配置"; a bare name like `adb` is assumed to be on PATH.
+        let adb_ok = if std::path::Path::new(adb).is_absolute() {
+            std::path::Path::new(adb).exists()
+        } else {
+            !adb.is_empty()
+        };
+        adb_ok && (!self.live_serial_hint.trim().is_empty() || !self.devices.is_empty())
     }
 
     fn start_capture(&mut self) {
@@ -1010,12 +1026,28 @@ impl UiViewerApp {
         if !self.recording {
             return;
         }
-        if let Some((pkg, act)) = crate::adb::current_app(&self.adb_path, &self.live_serial) {
+        // Annotate with the foreground app, but cache it for ~1.5s so a burst of
+        // recorded actions doesn't spawn an `adb shell dumpsys` per step.
+        if let Some((pkg, act)) = self.current_app_cached() {
             step.app = Some(pkg);
             step.activity = Some(act);
         }
         step.ts = Self::now_ts();
         self.steps.push(step);
+    }
+
+    /// Return the foreground app, re-querying `adb` at most about once per 1.5s.
+    fn current_app_cached(&mut self) -> Option<(String, String)> {
+        let fresh = self
+            .cached_app_at
+            .map_or(false, |t| t.elapsed() < Duration::from_millis(1500));
+        if fresh {
+            return self.cached_app.clone();
+        }
+        let app = crate::adb::current_app(&self.adb_path, &self.live_serial);
+        self.cached_app = app.clone();
+        self.cached_app_at = Some(Instant::now());
+        app
     }
 
     fn node_at(&self, x: i32, y: i32) -> Option<record::UiSelector> {
