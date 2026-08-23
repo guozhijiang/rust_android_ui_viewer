@@ -1768,6 +1768,12 @@ impl eframe::App for UiViewerApp {
                     ui.spinner();
                     ui.label("抓取中…");
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).weak(),
+                    )
+                    .on_hover_text("Android UI Viewer 版本号");
+                });
             });
             ui.horizontal_wrapped(|ui| {
                 if let Some((x, y)) = self.hover_pix {
