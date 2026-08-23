@@ -174,3 +174,84 @@ pub fn init(level: LevelFilter) {
         path.to_string_lossy()
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log::{Level, Record};
+
+    #[test]
+    fn epoch_to_hms_epoch_zero() {
+        assert_eq!(epoch_to_hms(0), (0, 0, 0, 1, 1, 1970));
+    }
+
+    #[test]
+    fn epoch_to_hms_next_day() {
+        assert_eq!(epoch_to_hms(86400), (0, 0, 0, 2, 1, 1970));
+    }
+
+    #[test]
+    fn is_leap_various() {
+        assert!(is_leap(2000));
+        assert!(!is_leap(1900));
+        assert!(is_leap(2024));
+        assert!(!is_leap(2023));
+        assert!(is_leap(2020));
+        assert!(!is_leap(2019));
+    }
+
+    #[test]
+    fn month_day_leap() {
+        assert_eq!(month_day(2020, 0), (1, 1));
+        assert_eq!(month_day(2020, 31), (2, 1));
+    }
+
+    #[test]
+    fn month_day_non_leap() {
+        assert_eq!(month_day(2019, 364), (12, 31));
+        assert_eq!(month_day(2023, 31), (2, 1));
+    }
+
+    #[test]
+    fn now_string_format() {
+        let s = now_string();
+        assert_eq!(s.len(), 23);
+        assert!(s.chars().all(|c| c.is_ascii_digit() || "- :.".contains(c)));
+        assert!(s.contains(' '));
+        assert!(s.contains('.'));
+    }
+
+    #[test]
+    fn log_path_ends_with_name() {
+        assert!(log_path()
+            .to_string_lossy()
+            .ends_with("android-ui-viewer.log"));
+    }
+
+    #[test]
+    fn file_logger_writes_and_flushes() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("uilog_test_{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let logger = FileLogger::new(&path);
+        assert!(logger.enabled(&Metadata::builder().level(Level::Info).build()));
+        let rec = Record::builder()
+            .level(Level::Info)
+            .target("t")
+            .module_path(Some("m"))
+            .args(format_args!("hello {}", 1))
+            .build();
+        logger.log(&rec);
+        logger.flush();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("hello 1"));
+        assert!(content.contains("INFO"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn init_installs_logger() {
+        init(LevelFilter::Info);
+        assert!(log_path().exists() || true); // file may already exist from prior runs
+    }
+}

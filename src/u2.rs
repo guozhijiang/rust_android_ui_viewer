@@ -140,6 +140,21 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_short_unchanged() {
+        assert_eq!(truncate("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_long_gets_ellipsis() {
+        assert_eq!(truncate("hello world", 5), "hello…");
+    }
+}
+
 /// Fetch the UI hierarchy, preferring the fast u2 server when available;
 /// otherwise fall back to the (slower) `uiautomator dump`.
 pub fn fetch_hierarchy(
