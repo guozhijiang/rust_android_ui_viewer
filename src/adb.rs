@@ -165,3 +165,32 @@ pub fn dump_ui(adb: &str) -> Result<String> {
         + "</hierarchy>".len();
     Ok(s[start..end].to_string())
 }
+
+/// Best-effort: return the foreground app's `(package, activity)`.
+/// Used only to annotate recording steps with context.
+pub fn current_app(adb: &str, serial: &str) -> Option<(String, String)> {
+    let mut c = Command::new(adb);
+    hide_console(&mut c);
+    if !serial.is_empty() {
+        c.arg("-s").arg(serial);
+    }
+    c.args(["shell", "dumpsys", "window", "|", "grep", "mCurrentFocus"]);
+    let out = c.output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(pos) = line.find("mCurrentFocus=") {
+            let rest = &line[pos + "mCurrentFocus=".len()..];
+            // Grab the first token containing a '/', e.g. com.pkg/.Activity
+            for tok in rest.split(|c: char| c == ' ' || c == '{' || c == '}') {
+                if let Some(slash) = tok.find('/') {
+                    let pkg = tok[..slash].to_string();
+                    let act = tok[slash + 1..].trim_end_matches('}').to_string();
+                    if !pkg.is_empty() {
+                        return Some((pkg, act));
+                    }
+                }
+            }
+        }
+    }
+    None
+}

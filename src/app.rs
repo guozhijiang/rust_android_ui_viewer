@@ -14,9 +14,54 @@ use egui::PointerButton;
 
 use crate::adb::{capture_serial, dump_ui, dump_ui_serial, list_devices, CaptureResult};
 use crate::live::{self, LiveControl, LiveEvent};
+use crate::record::{self, ReplayMsg};
 use crate::ui_tree::Node;
 
 const FAINT_NODE_LIMIT: usize = 2000;
+
+/// Compact UTC timestamp for default save-file names, e.g. `20260823_153045`.
+/// Avoids pulling in a date crate; good enough for a unique, sortable suffix.
+fn file_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (t / 86400) as i64;
+    let sod = t % 86400;
+    let (h, m, s) = (sod / 3600, (sod % 3600) / 60, sod % 60);
+    let (y, mo, d) = ymd_from_days(days);
+    format!("{y:04}{mo:02}{d:02}_{h:02}{m:02}{s:02}")
+}
+
+fn ymd_from_days(mut days: i64) -> (i64, i64, i64) {
+    let mut y = 1970;
+    loop {
+        let leap = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if days < leap {
+            break;
+        }
+        days -= leap;
+        y += 1;
+    }
+    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let mut mo = 0;
+    let mut d = days;
+    loop {
+        let md = month_days[mo] + if mo == 1 && leap { 1 } else { 0 };
+        if d < md {
+            break;
+        }
+        d -= md;
+        mo += 1;
+    }
+    (y, mo as i64 + 1, d as i64 + 1)
+}
 
 /// A press gesture on the live screen being tracked for tap/swipe detection.
 struct OpGest {
@@ -176,6 +221,32 @@ pub struct UiViewerApp {
     op_gest: Option<OpGest>,
     op_gest2: Option<OpGest>,
     xml_rx: Option<Receiver<anyhow::Result<String>>>,
+
+    // ---- Recording / replay of UI operations ----
+    recording: bool,
+    steps: Vec<record::RecordStep>,
+    last_tap_selector: Option<record::UiSelector>,
+    replaying: bool,
+    record_rx: Option<Receiver<ReplayMsg>>,
+    /// Replay repetitions (0 = single pass).
+    replay_loops: u32,
+    /// Replay speed multiplier (1.0 = recorded pace, 2.0 = twice as fast).
+    replay_speed: f32,
+    /// Whether the floating configuration window (adb / device / scrcpy) is open.
+    show_config: bool,
+    /// Set once the initial configuration (adb path + a target device) is done.
+    /// Until then the main features/pages stay disabled behind a setup screen.
+    configured: bool,
+    /// Throttle for the background hierarchy refresh done while recording so each
+    /// gesture resolves to a real element instead of an empty selector.
+    last_hier: Option<Instant>,
+    /// When set, the next hierarchy result should not overwrite the status line
+    /// (used for the quiet background refresh during recording).
+    hier_quiet: bool,
+    /// Index of the step currently being replayed (for list highlighting).
+    replay_current: Option<usize>,
+    /// Indices of replay steps that failed to resolve on the device.
+    replay_failed: Vec<usize>,
 }
 
 /// Icons drawn with the painter so they render identically everywhere
@@ -189,6 +260,18 @@ enum Icon {
     VolUp,
     VolDown,
     End,
+}
+
+/// Draw a filled badge with text at `pos` (top-left), used for prominent
+/// recording / replaying indicators over the live image.
+fn draw_badge(p: &egui::Painter, pos: Pos2, text: &str, color: Color32) {
+    let galley = p.ctx().fonts(|f| {
+        f.layout_no_wrap(text.to_string(), egui::FontId::proportional(16.0), Color32::WHITE)
+    });
+    let size = galley.size() + egui::vec2(16.0, 10.0);
+    let rect = Rect::from_min_size(pos, size);
+    p.rect_filled(rect, 6.0, color);
+    p.galley(rect.min + egui::vec2(8.0, 5.0), galley, Color32::WHITE);
 }
 
 /// Draw a 28px-ish icon centered in `rect`.
@@ -334,7 +417,7 @@ fn overlay_button(ui: &mut egui::Ui, rect: Rect, icon: Icon, tooltip: &str) -> b
 impl UiViewerApp {
     pub fn new() -> Self {
         crate::log::info!("UiViewerApp 已创建");
-        Self {
+        let mut this = Self {
             adb_path: "adb".to_string(),
             screenshot: None,
             image_size: None,
@@ -371,7 +454,24 @@ impl UiViewerApp {
             op_gest: None,
             op_gest2: None,
             xml_rx: None,
-        }
+            recording: false,
+            steps: Vec::new(),
+            last_tap_selector: None,
+            replaying: false,
+            record_rx: None,
+            replay_loops: 0,
+            replay_speed: 1.0,
+            show_config: true,
+            configured: false,
+            last_hier: None,
+            hier_quiet: false,
+            replay_current: None,
+            replay_failed: Vec::new(),
+        };
+        // Populate the device list up front so the config window (open by
+        // default) immediately shows what `adb devices` reports.
+        this.refresh_devices();
+        this
     }
 
     /// Best-effort load of a system CJK font so Chinese text in properties renders.
@@ -387,6 +487,11 @@ impl UiViewerApp {
                     .font_data
                     .insert("cjk".to_string(), FontData::from_owned(bytes));
                 if let Some(fam) = fonts.families.get_mut(&FontFamily::Proportional) {
+                    fam.insert(0, "cjk".to_string());
+                }
+                // The recording-steps list is drawn with the monospace family;
+                // without CJK there it would render Chinese as tofu boxes.
+                if let Some(fam) = fonts.families.get_mut(&FontFamily::Monospace) {
                     fam.insert(0, "cjk".to_string());
                 }
                 break;
@@ -420,6 +525,13 @@ impl UiViewerApp {
             }
             Err(e) => self.status = format!("刷新设备列表失败：{e}"),
         }
+    }
+
+    /// Whether the essentials for using the app are configured: an ADB path
+    /// and a target device (either already selected or detected on the bus).
+    fn config_ready(&self) -> bool {
+        !self.adb_path.trim().is_empty()
+            && (!self.live_serial_hint.trim().is_empty() || !self.devices.is_empty())
     }
 
     fn start_capture(&mut self) {
@@ -492,12 +604,39 @@ impl UiViewerApp {
         }
     }
 
-    /// Load a screenshot file and its matching XML hierarchy (two pickers).
+    /// Load a screenshot and its matching XML hierarchy in a single dialog.
+    /// Both files can be selected at once (in any order); if only the image is
+    /// chosen we also auto-load a sibling `<same-name>.xml` from its folder.
     fn load_dump(&mut self, ctx: &egui::Context) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Image", &["png", "jpg", "jpeg"])
-            .pick_file()
-        {
+        let files = rfd::FileDialog::new()
+            .add_filter("截图与层级", &["png", "jpg", "jpeg", "xml"])
+            .pick_files();
+        let (img_path, xml_path) = match files {
+            Some(fs) => {
+                let mut img = None;
+                let mut xml = None;
+                for f in &fs {
+                    let p = f;
+                    let ext = p
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+                        if img.is_none() {
+                            img = Some(p.to_path_buf());
+                        }
+                    } else if ext == "xml" {
+                        if xml.is_none() {
+                            xml = Some(p.to_path_buf());
+                        }
+                    }
+                }
+                (img, xml)
+            }
+            None => return,
+        };
+        if let Some(path) = img_path {
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     if let Err(e) = self.load_screenshot(ctx, &bytes) {
@@ -508,11 +647,18 @@ impl UiViewerApp {
                 }
                 Err(e) => self.status = format!("读取图片失败：{e}"),
             }
+            // Auto-pick the sibling XML next to the screenshot when it wasn't
+            // explicitly chosen.
+            if xml_path.is_none() {
+                let sibling = path.with_extension("xml");
+                if sibling.exists() {
+                    if let Ok(s) = std::fs::read_to_string(&sibling) {
+                        self.load_xml(&s);
+                    }
+                }
+            }
         }
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("XML", &["xml"])
-            .pick_file()
-        {
+        if let Some(path) = xml_path {
             match std::fs::read_to_string(&path) {
                 Ok(s) => self.load_xml(&s),
                 Err(e) => self.status = format!("读取 XML 失败：{e}"),
@@ -597,6 +743,35 @@ impl UiViewerApp {
         }
     }
 
+    fn start_replay(&mut self, steps: Vec<record::RecordStep>) {
+        if self.replaying || self.live_serial.is_empty() {
+            self.status = if self.live_serial.is_empty() {
+                "回放需要先启动操作会话并连接设备。".to_string()
+            } else {
+                "回放已在进行中。".to_string()
+            };
+            return;
+        }
+        // Show the exact steps being replayed in the list (covers the case where
+        // they were loaded from a file rather than recorded this session).
+        self.steps = steps.clone();
+        self.replaying = true;
+        self.replay_current = None;
+        self.replay_failed.clear();
+        let adb = self.adb_path.clone();
+        let serial = self.live_serial.clone();
+        let opts = record::ReplayOpts {
+            speed: self.replay_speed,
+            loops: self.replay_loops,
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<ReplayMsg>();
+        self.record_rx = Some(rx);
+        std::thread::spawn(move || {
+            record::replay(&adb, &serial, &steps, &tx, &opts);
+        });
+        self.status = "回放中…".to_string();
+    }
+
     fn send_text(&self, text: &str) {
         crate::log::debug!("发送文本 ({} 字符)", text.chars().count());
         if let Some(c) = &self.live_control {
@@ -608,10 +783,103 @@ impl UiViewerApp {
         }
     }
 
+    // ---- Recording helpers ----
+    fn now_ts() -> f64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
+    }
+
+    fn record_step(&mut self, mut step: record::RecordStep) {
+        if !self.recording {
+            return;
+        }
+        if let Some((pkg, act)) = crate::adb::current_app(&self.adb_path, &self.live_serial) {
+            step.app = Some(pkg);
+            step.activity = Some(act);
+        }
+        step.ts = Self::now_ts();
+        self.steps.push(step);
+    }
+
+    fn node_at(&self, x: i32, y: i32) -> Option<record::UiSelector> {
+        self.tree
+            .as_ref()
+            .and_then(|t| t.hit_test(x, y).and_then(|id| t.find(id)))
+            .map(record::build_selector)
+    }
+
+    fn record_tap(&mut self, x: i32, y: i32, long: bool) {
+        if !self.recording {
+            return;
+        }
+        let sel = self.node_at(x, y);
+        self.last_tap_selector = sel.clone();
+        let (w, h) = self.live_size.unwrap_or((0, 0));
+        let mut s = record::RecordStep::new(if long { "long_tap" } else { "tap" });
+        s.selector = sel;
+        if w > 0 {
+            s.fx = Some(x as f32 / w as f32);
+            s.fy = Some(y as f32 / h as f32);
+        }
+        self.record_step(s);
+    }
+
+    fn record_swipe(&mut self, sx: i32, sy: i32, ex: i32, ey: i32) {
+        if !self.recording {
+            return;
+        }
+        let (w, h) = self.live_size.unwrap_or((0, 0));
+        let mut s = record::RecordStep::new("swipe");
+        s.from_selector = self.node_at(sx, sy);
+        s.to_selector = self.node_at(ex, ey);
+        if w > 0 {
+            s.from_fx = Some(sx as f32 / w as f32);
+            s.from_fy = Some(sy as f32 / h as f32);
+            s.to_fx = Some(ex as f32 / w as f32);
+            s.to_fy = Some(ey as f32 / h as f32);
+        }
+        self.record_step(s);
+    }
+
+    fn record_text(&mut self, text: &str) {
+        if !self.recording {
+            return;
+        }
+        let mut s = record::RecordStep::new("text");
+        s.text = Some(text.to_string());
+        s.selector = self.last_tap_selector.clone();
+        self.record_step(s);
+    }
+
+    fn record_key(&mut self, code: u32, label: &str) {
+        if !self.recording {
+            return;
+        }
+        let mut s = record::RecordStep::new("key");
+        s.keycode = Some(code);
+        s.key = Some(label.to_string());
+        self.record_step(s);
+    }
+
     /// Dump + load the UI hierarchy while the live session keeps running.
     fn capture_hierarchy_now(&mut self) {
         crate::log::info!("抓取界面层级 serial={:?}", self.live_serial);
         self.status = "正在抓取界面层级…".to_string();
+        self.hier_quiet = false;
+        self.spawn_hierarchy_dump();
+    }
+
+    /// Same as `capture_hierarchy_now` but without touching the status line, for
+    /// the periodic background refresh done while recording.
+    fn refresh_hierarchy_quiet(&mut self) {
+        self.hier_quiet = true;
+        self.spawn_hierarchy_dump();
+    }
+
+    fn spawn_hierarchy_dump(&mut self) {
         let adb = self.adb_path.clone();
         let serial = self.live_serial.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -637,8 +905,13 @@ impl eframe::App for UiViewerApp {
 
         // In "查看 UI" mode, auto-capture the screen + hierarchy on first entry
         // (and whenever nothing is loaded yet) so inspection works immediately
-        // without a separate Capture click.
-        if !self.op_mode && self.tree.is_none() && !self.capturing && !self.auto_captured {
+        // without a separate Capture click. Gated on being configured first.
+        if self.configured
+            && !self.op_mode
+            && self.tree.is_none()
+            && !self.capturing
+            && !self.auto_captured
+        {
             self.auto_captured = true;
             self.start_capture();
         }
@@ -664,7 +937,9 @@ impl eframe::App for UiViewerApp {
             }
         }
 
-        // Drain a pending hierarchy-only dump (op mode "grab hierarchy").
+        // Drain a pending hierarchy-only dump (op mode "grab hierarchy" or the
+        // background refresh done while recording). The quiet refresh (started by
+        // the recording auto-refresh) must not overwrite the status line.
         if let Some(rx) = &self.xml_rx {
             if let Ok(result) = rx.try_recv() {
                 match result {
@@ -672,9 +947,83 @@ impl eframe::App for UiViewerApp {
                     Err(e) => self.status = format!("层级抓取失败：{e}"),
                 }
                 self.xml_rx = None;
-                self.status = format!("{}  点击界面可操作；Ctrl+点击可选中元素。", self.status);
+                if !self.hier_quiet {
+                    self.status =
+                        format!("{}  点击界面可操作；Ctrl+点击可选中元素。", self.status);
+                }
                 ctx.request_repaint();
             }
+        }
+
+        // While recording, keep the hierarchy fresh in the background so each
+        // gesture resolves to a real element (text / resource-id) instead of an
+        // empty selector. Throttled to ~1s and skipped while a dump is in flight.
+        if self.recording && self.live_started && self.xml_rx.is_none() {
+            let need = match self.last_hier {
+                None => true,
+                Some(t) => t.elapsed() > Duration::from_millis(1000),
+            };
+            if need {
+                self.last_hier = Some(Instant::now());
+                self.refresh_hierarchy_quiet();
+            }
+        }
+
+        // Drain replay progress messages (and remember the active/failed steps).
+        let keep_rx = if let Some(rx) = self.record_rx.take() {
+            let mut finished = false;
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    ReplayMsg::Progress {
+                        index,
+                        total,
+                        loop_idx,
+                        loops,
+                        action,
+                    } => {
+                        self.replay_current = Some(index);
+                        self.status = format!(
+                            "回放 {}/{} (第 {}/{} 轮): {}",
+                            index + 1,
+                            total,
+                            loop_idx + 1,
+                            loops,
+                            action
+                        );
+                    }
+                    ReplayMsg::Failed { index, text } => {
+                        self.replay_current = Some(index);
+                        if !self.replay_failed.contains(&index) {
+                            self.replay_failed.push(index);
+                        }
+                        self.status = format!("回放步骤 {} 失败：{}", index + 1, text);
+                    }
+                    ReplayMsg::Info(s) => {
+                        self.status = s;
+                    }
+                    ReplayMsg::Done => {
+                        finished = true;
+                    }
+                }
+            }
+            if finished {
+                self.replaying = false;
+                self.replay_current = None;
+                let failed = self.replay_failed.len();
+                self.status = if failed == 0 {
+                    "回放完成。".to_string()
+                } else {
+                    format!("回放完成，其中 {} 个步骤未找到匹配元素。", failed)
+                };
+                None
+            } else {
+                Some(rx)
+            }
+        } else {
+            None
+        };
+        if let Some(rx) = keep_rx {
+            self.record_rx = Some(rx);
         }
 
         // Drain live-session events (frames, status, errors).
@@ -773,7 +1122,7 @@ impl eframe::App for UiViewerApp {
             }
         }
 
-        // ---- Top panel: actions + adb path + status ----
+        // ---- Top panel: actions + config toggle + status ----
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 // Grabbing is automatic when entering "查看 UI", so the top bar
@@ -785,9 +1134,9 @@ impl eframe::App for UiViewerApp {
                     self.load_dump(ctx);
                 }
                 ui.separator();
-                ui.label("ADB 路径:");
-                ui.text_edit_singleline(&mut self.adb_path);
-                ui.separator();
+                if ui.button("⚙ 配置").clicked() {
+                    self.show_config = !self.show_config;
+                }
                 if self.capturing {
                     ui.spinner();
                     ui.label("抓取中…");
@@ -798,15 +1147,44 @@ impl eframe::App for UiViewerApp {
                     ui.monospace(format!("坐标: ({x}, {y})"));
                 }
                 ui.separator();
-                ui.colored_label(Color32::from_rgb(220, 220, 220), &self.status);
+                let status_color = if self.status.contains("失败")
+                    || self.status.contains("错误")
+                    || self.status.contains("请")
+                    || self.status.contains("无法")
+                    || self.status.contains("为空")
+                    || self.status.contains("需要")
+                {
+                    Color32::from_rgb(240, 130, 130)
+                } else {
+                    Color32::from_rgb(220, 220, 220)
+                };
+                ui.colored_label(status_color, &self.status);
             });
         });
 
-        // ---- Bottom panel: live control quick buttons (always shown so the
-        // session can be started/stopped and configured at any time) ----
-        egui::TopBottomPanel::bottom("op_controls").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("设备:");
+        // ---- Floating configuration window: ADB path, device selection,
+        // scrcpy options. Consolidates everything that was previously spread
+        // across the top/bottom bars so the main UI stays focused on the task. ----
+        if self.show_config {
+            let mut cfg_open = self.show_config;
+            egui::Window::new("⚙ 配置")
+                .open(&mut cfg_open)
+                .default_width(360.0)
+                .show(ctx, |ui| {
+                    ui.label("ADB 路径:");
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.adb_path);
+                        if ui.button("浏览…").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .add_filter("adb", &["exe"])
+                                .pick_file()
+                            {
+                                self.adb_path = p.display().to_string();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    ui.label("设备:");
                     let sel_text = if self.live_serial_hint.is_empty() {
                         "<选择设备>".to_string()
                     } else {
@@ -822,22 +1200,26 @@ impl eframe::App for UiViewerApp {
                                 ui.selectable_value(&mut self.live_serial_hint, d.clone(), d);
                             }
                         });
-                    if ui.button("刷新").clicked() {
-                        self.refresh_devices();
-                    }
-                    if ui.button("连接").clicked() {
-                        if !self.live_started {
+                    ui.horizontal(|ui| {
+                        if ui.button("刷新").clicked() {
+                            self.refresh_devices();
+                        }
+                        if self.live_started {
+                            ui.label("● 已连接");
+                        } else if ui.button("连接").clicked() {
                             self.start_live();
                         }
-                    }
-                    ui.label("序列号(可手填):");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.live_serial_hint).desired_width(110.0),
-                    );
+                    });
+                    ui.separator();
                     ui.label("scrcpy 目录:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.scrcpy_dir).desired_width(160.0),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.scrcpy_dir);
+                        if ui.button("浏览…").clicked() {
+                            if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                                self.scrcpy_dir = p.display().to_string();
+                            }
+                        }
+                    });
                     ui.label("画质:")
                         .on_hover_text("清晰度越低，传输量越小、操作越跟手；卡顿时优先选极速");
                     egui::ComboBox::from_id_source("quality")
@@ -852,26 +1234,36 @@ impl eframe::App for UiViewerApp {
                             ui.selectable_value(&mut self.quality, 2, "极速 (720, ~2Mbps)");
                         });
                     if self.quality == 0 {
-                        ui.label("最大尺寸:");
-                        ui.add(
-                            egui::DragValue::new(&mut self.max_video_size)
-                                .clamp_range(0u32..=10000),
-                        )
-                        .on_hover_text("0 = 设备原始分辨率");
+                        ui.horizontal(|ui| {
+                            ui.label("最大尺寸:");
+                            ui.add(
+                                egui::DragValue::new(&mut self.max_video_size)
+                                    .clamp_range(0u32..=10000),
+                            )
+                            .on_hover_text("0 = 设备原始分辨率");
+                        });
                     }
                     ui.separator();
-                    ui.label("文本输入:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.input_text).desired_width(160.0),
-                    );
-                    if ui.button("发送").clicked() && !self.input_text.trim().is_empty() {
-                        self.send_text(self.input_text.trim());
+                    let ready = self.config_ready();
+                    let btn = egui::Button::new("完成配置并进入")
+                        .fill(if ready {
+                            Color32::from_rgb(40, 150, 70)
+                        } else {
+                            Color32::from_gray(120)
+                        });
+                    if ui.add_enabled(ready, btn).clicked() {
+                        self.refresh_devices();
+                        self.configured = true;
+                        self.status = "配置完成，可以开始使用了。".to_string();
                     }
-                    if ui.button("抓取层级").clicked() {
-                        self.capture_hierarchy_now();
+                    if !ready {
+                        ui.label("请先设置 ADB 路径，并在「刷新」后选择/连接一台设备。");
                     }
                 });
-            });
+            // Once configured, keep the window closed; otherwise mirror the
+            // window's own open/close state (e.g. the X button).
+            self.show_config = if self.configured { false } else { cfg_open };
+        }
 
         // ---- Left panel: element properties (always present so the layout
         // width is constant; content hidden in operate mode) ----
@@ -920,16 +1312,163 @@ impl eframe::App for UiViewerApp {
             .show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.heading("UI 层级结构");
-                    if self.tree.is_some() {
-                        ui.weak(format!("{} 个节点", self.tree_count));
+                    if self.op_mode {
+                        ui.heading("录制控制");
+                    } else {
+                        ui.heading("UI 层级结构");
+                        if self.tree.is_some() {
+                            ui.weak(format!("{} 个节点", self.tree_count));
+                        }
                     }
                 });
                 if self.op_mode {
                     ui.separator();
-                    ui.centered_and_justified(|ui| {
-                        ui.label("操作模式下不显示 UI 节点树");
+                    ui.label("文本输入:");
+                    ui.text_edit_singleline(&mut self.input_text);
+                    if ui.button("发送").clicked() && !self.input_text.trim().is_empty() {
+                        self.send_text(self.input_text.trim());
+                        let t = self.input_text.trim().to_string();
+                        self.record_text(&t);
+                    }
+                    ui.separator();
+                    if ui.button("抓取层级").clicked() {
+                        self.capture_hierarchy_now();
+                    }
+                    ui.separator();
+                    ui.label("录制 / 回放:");
+                    let rec_label = if self.recording { "■ 停止录制" } else { "● 开始录制" };
+                    let rec_btn = egui::Button::new(rec_label).fill(if self.recording {
+                        Color32::from_rgb(200, 40, 40)
+                    } else {
+                        Color32::from_rgb(40, 150, 70)
                     });
+                    if ui.add(rec_btn).clicked() {
+                        self.recording = !self.recording;
+                        if self.recording {
+                            self.steps.clear();
+                            self.replay_failed.clear();
+                            self.replay_current = None;
+                            self.last_hier = None;
+                            // Grab the current hierarchy so element selectors get
+                            // recorded alongside the fractional coordinate fallback.
+                            self.capture_hierarchy_now();
+                            self.status =
+                                "● 录制已开始：在设备上执行的操作会被记录，停止后会提示保存。".to_string();
+                        } else {
+                            // Stopped: offer to save. Cancelling the dialog simply
+                            // discards without saving — no separate save button needed.
+                            let n = self.steps.len();
+                            if n > 0 {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .set_file_name(format!("recording_{}.yaml", file_timestamp()))
+                                    .add_filter("YAML", &["yaml", "yml"])
+                                    .save_file()
+                                {
+                                    match record::save_yaml(&path, &self.steps) {
+                                        Ok(_) => {
+                                            self.status = format!(
+                                                "■ 录制已停止，已保存 {} 步到 {}",
+                                                n,
+                                                path.display()
+                                            )
+                                        }
+                                        Err(e) => {
+                                            self.status = format!("保存失败: {e}")
+                                        }
+                                    }
+                                } else {
+                                    self.status = format!(
+                                        "■ 录制已停止（共 {} 步，未保存）。",
+                                        n
+                                    );
+                                }
+                            } else {
+                                self.status =
+                                    "■ 录制已停止，没有录制到任何步骤。".to_string();
+                            }
+                        }
+                    }
+                    ui.label(format!("已录制: {} 步", self.steps.len()));
+                    ui.horizontal(|ui| {
+                        if ui.button("清除").clicked() {
+                            self.steps.clear();
+                            self.status = "已清除录制。".to_string();
+                        }
+                    });
+                    ui.separator();
+                    ui.label("回放设置:");
+                    ui.horizontal(|ui| {
+                        ui.label("速度:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.replay_speed)
+                                .speed(0.1)
+                                .clamp_range(0.25..=8.0),
+                        )
+                        .on_hover_text("1.0 = 录制时节奏，2.0 = 两倍速，0.5 = 半速");
+                        ui.label("循环:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.replay_loops)
+                                .clamp_range(0u32..=100),
+                        )
+                        .on_hover_text("0 = 单次；N = 重复 N 次");
+                    });
+                    if ui.button("加载并回放…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("YAML", &["yaml", "yml"])
+                            .pick_file()
+                        {
+                            match record::load_yaml(&path) {
+                                Ok(steps) => {
+                                    if steps.is_empty() {
+                                        self.status = "录制文件为空。".to_string();
+                                    } else {
+                                        self.start_replay(steps);
+                                    }
+                                }
+                                Err(e) => self.status = format!("{e}"),
+                            }
+                        }
+                    }
+                    if self.replaying {
+                        ui.label("回放进行中…");
+                    }
+                    ui.separator();
+                    egui::collapsing_header::CollapsingHeader::new("录制步骤列表")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if self.steps.is_empty() {
+                                ui.label("（暂无录制步骤）");
+                            } else {
+                                // Highlight: red = replay failed, green = the step
+                                // currently being recorded (last) or replayed.
+                                let active = if self.recording {
+                                    self.steps.len().saturating_sub(1)
+                                } else {
+                                    self.replay_current.unwrap_or(usize::MAX)
+                                };
+                                let base = ui.style().visuals.text_color();
+                                egui::ScrollArea::vertical()
+                                    .max_height(220.0)
+                                    .auto_shrink([false, true])
+                                    .show(ui, |ui| {
+                                        for (i, s) in self.steps.iter().enumerate() {
+                                            let color = if self.replay_failed.contains(&i) {
+                                                Color32::from_rgb(235, 90, 90)
+                                            } else if i == active
+                                                && (self.recording || self.replaying)
+                                            {
+                                                Color32::from_rgb(70, 200, 100)
+                                            } else {
+                                                base
+                                            };
+                                            ui.colored_label(
+                                                color,
+                                                format!("{:>3}. {}", i + 1, s.describe()),
+                                            );
+                                        }
+                                    });
+                            }
+                        });
                     return;
                 }
                 ui.separator();
@@ -974,6 +1513,25 @@ impl eframe::App for UiViewerApp {
 
         // ---- Center: mode strip + live view (op mode) or screenshot + overlays ----
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Until the initial configuration is completed, show a setup screen
+            // and don't load the device-dependent pages (capture / live).
+            if !self.configured {
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.heading("欢迎使用 Android UI Viewer");
+                        ui.add_space(8.0);
+                        ui.label("使用前请先完成配置：");
+                        ui.label("1. 点击右上角「⚙ 配置」，设置 ADB 路径（可浏览选择或手填）");
+                        ui.label("2. 点击「刷新」选择目标设备，并点击「连接」");
+                        ui.label("3. 点击「完成配置并进入」开始使用");
+                        ui.add_space(8.0);
+                        if ui.button("打开配置").clicked() {
+                            self.show_config = true;
+                        }
+                    });
+                });
+                return;
+            }
             // Mode selector sits directly above the image. Picking "查看 UI"
             // immediately captures the screen + hierarchy (no separate Capture
             // click needed); picking "操作设备" starts the live control session.
@@ -982,7 +1540,11 @@ impl eframe::App for UiViewerApp {
             // constant width and the buttons never jump when switching modes.
             ui.horizontal_wrapped(|ui| {
                 ui.label("模式:");
-                if ui.selectable_label(!self.op_mode, "查看 UI").clicked() {
+                let enabled = self.configured;
+                if ui
+                    .add_enabled(enabled, egui::SelectableLabel::new(!self.op_mode, "查看 UI"))
+                    .clicked()
+                {
                     // Always re-capture on (re)entering view mode: the device
                     // screen may have changed while operating, so refresh the
                     // screenshot + hierarchy instead of reusing the stale dump.
@@ -991,7 +1553,10 @@ impl eframe::App for UiViewerApp {
                         self.start_capture();
                     }
                 }
-                if ui.selectable_label(self.op_mode, "操作设备").clicked() {
+                if ui
+                    .add_enabled(enabled, egui::SelectableLabel::new(self.op_mode, "操作设备"))
+                    .clicked()
+                {
                     if !self.op_mode {
                         self.op_mode = true;
                         if !self.live_started {
@@ -1066,6 +1631,24 @@ impl eframe::App for UiViewerApp {
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );
+
+                // Prominent recording / replaying indicator over the live image.
+                if self.recording {
+                    draw_badge(
+                        ui.painter(),
+                        draw_rect.min + Vec2::new(10.0, 10.0),
+                        "● 录制中",
+                        Color32::from_rgb(220, 40, 40),
+                    );
+                }
+                if self.replaying {
+                    draw_badge(
+                        ui.painter(),
+                        draw_rect.min + Vec2::new(10.0, 10.0),
+                        "▶ 回放中",
+                        Color32::from_rgb(230, 150, 20),
+                    );
+                }
 
                 // Map a pointer position to device coordinates (None if outside).
                 let to_dev = |p: Pos2| -> Option<(i32, i32)> {
@@ -1147,6 +1730,14 @@ impl eframe::App for UiViewerApp {
                         } else {
                             self.adb_sh(&format!("input tap {sx} {sy}"));
                         }
+                        // Record the gesture (selector + fractional fallback).
+                        if g.moved {
+                            if let Some((ex, ey)) = end {
+                                self.record_swipe(sx, sy, ex, ey);
+                            }
+                        } else {
+                            self.record_tap(lifted.0, lifted.1, elapsed > 500);
+                        }
                         crate::log::debug!(
                             "touch_up ({}, {}) moved={} elapsed_ms={} ({} 坐标)",
                             lifted.0,
@@ -1208,6 +1799,7 @@ impl eframe::App for UiViewerApp {
                         // A right click (no drag) acts as the Back button.
                         if !g.moved {
                             self.send_key(4);
+                            self.record_key(4, "返回");
                         }
                     }
                 }
@@ -1274,7 +1866,10 @@ impl eframe::App for UiViewerApp {
                                 self.stop_live();
                                 self.op_mode = false;
                             }
-                            Some(k) => self.send_key(k),
+                            Some(k) => {
+                                self.send_key(k);
+                                self.record_key(k, tip);
+                            }
                         }
                     }
                     y += side_h + spacing;
@@ -1297,6 +1892,7 @@ impl eframe::App for UiViewerApp {
                     let r = Rect::from_min_size(Pos2::new(x, nav_y), Vec2::new(nav_btn_w, nav_h));
                     if overlay_button(ui, r, icon, tip) {
                         self.send_key(key);
+                        self.record_key(key, tip);
                     }
                     x += nav_btn_w + spacing;
                 }
@@ -1408,6 +2004,7 @@ impl eframe::App for UiViewerApp {
         // operate mode, and only while the cursor is over the live phone image,
         // so typing in our own text fields is unaffected.
         if self.op_mode {
+            let mut rec_keys: Vec<(u32, String)> = Vec::new();
             if let Some(ctrl) = &self.live_control {
                 if self.hover_pix.is_some() {
                     let mods = ctx.input(|i| i.modifiers);
@@ -1422,6 +2019,7 @@ impl eframe::App for UiViewerApp {
                                 if let Some(code) = android_keycode(key, is_shortcut) {
                                     if pressed {
                                         ctrl.key_down_meta(code, meta);
+                                        rec_keys.push((code, format!("{key:?}")));
                                     } else {
                                         ctrl.key_up_meta(code, meta);
                                     }
@@ -1433,6 +2031,9 @@ impl eframe::App for UiViewerApp {
                         }
                     }
                 }
+            }
+            for (code, label) in rec_keys {
+                self.record_key(code, &label);
             }
         }
     }

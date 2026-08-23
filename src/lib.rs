@@ -6,5 +6,6 @@ pub mod adb;
 pub mod app;
 pub mod live;
 pub mod log;
+pub mod record;
 pub mod scrcpy;
 pub mod ui_tree;
