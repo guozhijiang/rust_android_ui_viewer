@@ -13,15 +13,17 @@ fn hide_console(cmd: &mut Command) {
 }
 
 /// Common settings/tables the left panel offers a one-tap deep link into.
+/// (Only entries that open a real, reachable screen on most devices are kept —
+/// Wi-Fi hotspot / storage are often no-ops so they are omitted.)
 pub const SYSTEM_SETTINGS: &[(&str, &str)] = &[
     ("Wi-Fi", "android.settings.WIFI_SETTINGS"),
     ("蓝牙", "android.settings.BLUETOOTH_SETTINGS"),
     ("声音", "android.settings.SOUND_SETTINGS"),
     ("显示", "android.settings.DISPLAY_SETTINGS"),
-    ("Wi-Fi 热点", "android.settings.WIRELESS_SETTINGS"),
+    ("通知", "android.settings.NOTIFICATION_SETTINGS"),
     ("应用", "android.settings.APPLICATION_SETTINGS"),
-    ("存储", "android.settings.INTERNAL_STORAGE_SETTINGS"),
-    ("开发者选项", "android.settings.APPLICATION_DEVELOPMENT_SETTINGS"),
+    ("电池", "android.settings.BATTERY_SAVER_SETTINGS"),
+    ("辅助功能", "android.settings.ACCESSIBILITY_SETTINGS"),
 ];
 
 /// A single installed app entry, as shown in the left panel list.
@@ -45,6 +47,10 @@ pub struct DeviceInfo {
     pub density: String,
     pub battery: String,
     pub serial: String,
+    /// Human storage summary, e.g. `"可用 19G / 总 48G"`.
+    pub storage: String,
+    /// Build/firmware identifier, e.g. the incremental build number.
+    pub build: String,
 }
 
 /// A shell-backed adb command (honours `-s <serial>` when non-empty) with no
@@ -73,13 +79,18 @@ fn read_props(adb: &str, serial: &str) -> std::collections::HashMap<String, Stri
     let text = sh_stdout(adb, serial, &["shell", "getprop"]);
     for line in text.lines() {
         let line = line.trim();
-        if let (Some(k), Some(v)) = (line.find('['), line.rfind('[')) {
-            if k == 0 && v > 0 {
-                let key = &line[1..v];
-                let rest = &line[v + 1..];
-                let val = rest.trim_end_matches(']').trim_start_matches(']').trim();
-                let val = val.strip_suffix(']').unwrap_or(val);
-                map.insert(key.to_string(), val.to_string());
+        // Format:  [key]: [value]
+        if let Some(body) = line.strip_prefix('[') {
+            if let Some(close) = body.find(']') {
+                let key = &body[..close];
+                if key.is_empty() {
+                    continue;
+                }
+                let after = body[close + 1..].trim();
+                if let Some(v) = after.strip_prefix(": [") {
+                    let val = v.strip_suffix(']').unwrap_or(v).trim();
+                    map.insert(key.to_string(), val.to_string());
+                }
             }
         }
     }
@@ -90,6 +101,11 @@ fn read_props(adb: &str, serial: &str) -> std::collections::HashMap<String, Stri
 pub fn device_info(adb: &str, serial: &str) -> DeviceInfo {
     let p = read_props(adb, serial);
     let dpi = p.get("ro.sf.lcd_density").cloned().unwrap_or_default();
+    let build = p
+        .get("ro.build.display.id")
+        .or_else(|| p.get("ro.build.version.incremental"))
+        .cloned()
+        .unwrap_or_default();
     DeviceInfo {
         brand: p.get("ro.product.brand").cloned().unwrap_or_default(),
         model: p.get("ro.product.model").cloned().unwrap_or_default(),
@@ -106,6 +122,8 @@ pub fn device_info(adb: &str, serial: &str) -> DeviceInfo {
         },
         battery: battery_pct(adb, serial),
         serial: serial.to_string(),
+        storage: storage_summary(adb, serial),
+        build,
     }
 }
 
@@ -118,16 +136,35 @@ fn battery_pct(adb: &str, serial: &str) -> String {
                 return format!("{n}%");
             }
         }
-        if let Some(chg) = line.trim_start().strip_prefix("status:") {
-            // 2 = charging, 3 = discharging, 5 = full
-            return match chg.trim() {
-                "2" => "充电中".to_string(),
-                "5" => "已充满".to_string(),
-                other => other.to_string(),
-            };
-        }
     }
     String::new()
+}
+
+/// Best-effort internal storage summary from `df /data` (report  sizes in GB).
+fn storage_summary(adb: &str, serial: &str) -> String {
+    let out = sh_stdout(adb, serial, &["shell", "df", "/data"]);
+    // Line 2 (after the header) holds: fs total used available use% mount.
+    let line = out.lines().nth(1).unwrap_or_default();
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 4 {
+        return String::new();
+    }
+    let to_gb = |blocks: &str| -> String {
+        blocks
+            .parse::<u64>()
+            .ok()
+            .map(|b| format!("{}G", b / 1024 / 1024))
+            .unwrap_or_default()
+    };
+    let total = to_gb(cols[1]);
+    let avail = to_gb(cols[3]);
+    if total.is_empty() {
+        String::new()
+    } else if avail.is_empty() {
+        format!("总 {total}")
+    } else {
+        format!("可用 {avail} / 总 {total}")
+    }
 }
 
 /// List installed packages. `filter` restricts the section: "all", "system",
@@ -188,19 +225,79 @@ pub fn list_apps(adb: &str, serial: &str, filter: &str) -> Vec<AppInfo> {
 /// Read a package's version metadata via `dumpsys package`.
 pub fn app_properties(adb: &str, serial: &str, pkg: &str) -> String {
     let out = sh_stdout(adb, serial, &["shell", "dumpsys", "package", pkg]);
-    let mut props = Vec::new();
+    // `dumpsys package` prints these as part of a longer line, e.g.
+    //   Package [com.foo] (abc): versionName=1.2.3 versionCode=123 targetSdk=34
+    // so match the `key=` token anywhere on a line and read until the next space.
+    let mut seen = std::collections::BTreeMap::new();
     for line in out.lines() {
-        let l = line.trim();
         for key in ["versionName", "versionCode", "firstInstallTime", "lastUpdateTime"] {
-            if let Some(v) = l.strip_prefix(&format!("{key}=")) {
-                props.push(format!("{key}: {v}"));
+            let pat = format!("{key}=");
+            if let Some(pos) = line.find(&pat) {
+                let val = line[pos + pat.len()..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('}')
+                    .to_string();
+                if !val.is_empty() {
+                    seen.entry(key).or_insert_with(|| val.clone());
+                }
             }
         }
     }
+    let mut props: Vec<String> = seen
+        .into_iter()
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect();
     if props.is_empty() {
         format!("未查询到 {pkg} 的信息（包未安装？）")
     } else {
+        props.insert(0, format!("包名: {pkg}"));
         props.join("\n")
+    }
+}
+
+/// Uninstall a package (`pm uninstall --user 0`). Returns an adb status line.
+pub fn uninstall_app(adb: &str, serial: &str, pkg: &str) -> String {
+    let out = shell(adb, serial, &["shell", "pm", "uninstall", "--user", "0", pkg])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if out.is_empty() || out == "Success" {
+        format!("已卸载 {pkg}")
+    } else {
+        out
+    }
+}
+
+/// Inject a single key event (`input keyevent <code>`).
+pub fn input_key(adb: &str, serial: &str, code: &str) {
+    let _ = shell(adb, serial, &["shell", "input", "keyevent", code]).spawn();
+}
+
+/// Set screen brightness (0..255) and return the result string.
+pub fn set_brightness(adb: &str, serial: &str, value: u16) -> String {
+    let v = value.to_string();
+    let out = shell(adb, serial, &["shell", "settings", "put", "system", "screen_brightness", &v])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if out.is_empty() {
+        format!("亮度已设为 {}%", value as u32 * 100 / 255)
+    } else {
+        out
+    }
+}
+
+/// Toggle automatic brightness (`screen_brightness_mode`: 1 auto, 0 manual).
+pub fn set_auto_brightness(adb: &str, serial: &str, on: bool) -> String {
+    let v = if on { "1" } else { "0" };
+    let _ = shell(adb, serial, &["shell", "settings", "put", "system", "screen_brightness_mode", v])
+        .spawn();
+    if on {
+        "已开启自动亮度".to_string()
+    } else {
+        "已关闭自动亮度".to_string()
     }
 }
 
@@ -300,8 +397,7 @@ pub fn open_app_settings(adb: &str, serial: &str, pkg: &str) {
 
 /// Deep-link to a system settings screen by action string.
 pub fn open_settings_action(adb: &str, serial: &str, action: &str) {
-    let _ = shell(adb, serial, &["shell", "am", "start", "-a", action, "android.settings.SETTINGS"])
-        .spawn();
+    let _ = shell(adb, serial, &["shell", "am", "start", "-a", action]).spawn();
 }
 
 /// Result of a full capture: raw PNG bytes + the uiautomator XML dump.

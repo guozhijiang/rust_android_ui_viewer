@@ -8,7 +8,7 @@
 
 ## 功能
 
-- **一键抓取**：通过 adb 执行 `screencap` 和 `uiautomator dump`，同时获取截图与界面层级。
+- **一键抓取**：通过 adb 同时获取截图（`screencap`）与界面层级 XML。层级优先走 **u2（uiautomator2）快速抓取**——比 `uiautomator dump` 快、且对部分机型/高版本系统可用的唯一途径；未配置 u2 时自动回退到 `uiautomator dump`。
 - **本地导入**：支持将截图（png/jpg/jpeg）和 uiautomator XML 拖入窗口或通过文件对话框加载。
 - **三栏布局**：
   - 左侧：元素属性（class、resource-id、text、bounds 等，全部显示无需滚动）。
@@ -33,6 +33,22 @@
 - 顶栏按钮：返回 / 主页 / 最近 / 电源 / 音量±，以及文本输入框与「抓取层级」（抓取当前界面 XML 叠加到画面上，可点选元素）。
 - 触摸坐标以**视频帧分辨率**为基准、由设备端按当前分辨率缩放，因此设置「最大尺寸」也不会错位。
 - 若控制通道建立失败（如旧版 server），会自动回退到 `adb shell input`，状态栏会提示。
+
+## 左面板：设备与应用管理（操作模式）
+
+进入「操作模式」后，左侧面板提供三个标签（数据在连接设备后自动加载，也支持右上角「↻ 刷新」手动刷新）：
+
+- **设备信息**：机型 / 品牌 / 系统版本（Android + API）/ 分辨率 / DPI / 电量 / 存储 / 软件版本 / 序列号。
+- **应用**：应用列表（全部 / 三方 / 系统 / 运行中）与包名搜索；点选后显示版本、安装时间等属性，并可 **启动 / 强制停止 / 清除数据 / 打开应用设置 / 卸载**（卸载仅三方应用可用）；底部支持 **从本地选择 APK 安装**（后台安装，不卡界面）。
+- **系统设置**：一键直达 Wi-Fi、蓝牙、声音、显示、通知、应用、电池、辅助功能等系统设置页；以及设备快捷操作（锁屏 / 主页 / 返回 / 最近任务 / 音量± / 亮度分档与自动亮度）。
+
+## u2（uiautomator2）加速
+
+部分 Android 真机 / 高版本系统上 `uiautomator dump` 会失败（不产出 XML），本工具自动依赖 **u2** 服务实现快速抓取：
+
+- 工具会从配置里指定的 `u2_core.jar`（或默认路径 `%USERPROFILE%\.u2\u2_core.jar`）推送到设备，经 `adb forward` 暴露本地 JSON-RPC 端口，以 `app_process` 启动服务。
+- 抓取层级 / 实时刷新 / 录制回放定位元素时，均优先走 u2 的快速 `dumpWindowHierarchy`；u2 不可用时自动回退到 adb dump。
+- 启动软件时会自动尝试启用 u2；可在「配置」窗口手动指定 jar 路径并重新「推送并启动」。
 
 ## 环境要求
 
@@ -84,12 +100,15 @@ cargo build --release && ./target/release/android-ui-viewer.exe
 ```
 src/
 ├── main.rs      # 程序入口与窗口配置
-├── lib.rs       # 模块声明（app / adb / ui_tree / live / scrcpy）
-├── app.rs       # GUI 布局、树渲染、属性展示、截图覆盖层、操作模式交互
-├── adb.rs       # adb 截图与 uiautomator dump 封装
+├── lib.rs       # 模块声明（app / adb / ui_tree / live / scrcpy / record / log / u2）
+├── app.rs       # GUI 布局、树渲染、属性展示、截图覆盖层、操作模式交互、左面板设备/应用管理
+├── adb.rs       # adb 封装：截图、UI dump、设备属性、应用安装/启动/停止/卸载、系统设置跳转
 ├── ui_tree.rs   # UI 层级 XML 解析、命中检测、节点查询
+├── u2.rs        # uiautomator2 (u2.jar) 集成：jar 推送、服务启动、JSON-RPC 快速抓层级
 ├── live.rs      # scrcpy 实时会话：推送 server、拉流、控制通道、自动下载 scrcpy 包
-└── scrcpy.rs    # 动态加载 FFmpeg DLL 软解 H.264 → RGBA
+├── scrcpy.rs    # 动态加载 FFmpeg DLL 软解 H.264 → RGBA
+├── record.rs    # 录制与回放：步骤采集、selector 定位、YAML 持久化
+└── log.rs       # 日志初始化与滚动日志
 ```
 
 ## 参考与出处
@@ -104,5 +123,7 @@ src/
   - 全部 GUI（三栏布局、截图覆盖层、属性面板、层级树）基于 egui 即时模式框架，eframe 提供窗口与事件循环。
 - **[uiautomator](https://developer.android.com/tools/help/uiautomator)**（Android 官方）
   - 「Capture」模式的 UI 层级来源：`adb shell uiautomator dump` 产出的控件树 XML，以及 `adb exec-out screencap -p` 截取的屏幕图像。
+- **[uiautomator2](https://github.com/openatx/openatx)**（openatx/openatx，MIT）
+  - 快速抓取所用的 `u2_core.jar`（`com.wetest.uia2.Main`，`dumpWindowHierarchy` JSON-RPC）：`<https://github.com/openatx/android-uiautomator-server-jar>`（源包内 `assets/u2.jar`，v0.4.0）。用于替代部分设备上不可用的 `uiautomator dump`。
 - **[FFmpeg](https://ffmpeg.org/)**（LGPL/GPL）
   - 通过 scrcpy 附带的 FFmpeg 动态库（`avcodec-62.dll` / `avutil-60.dll`，FFmpeg 7.x）完成 H.264 解码。

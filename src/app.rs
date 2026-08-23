@@ -14,8 +14,9 @@ use egui::PointerButton;
 
 use crate::adb::{
     app_properties, capture_serial, clear_app, device_info, dump_ui, dump_ui_serial, force_stop,
-    install_apk, list_apps, list_devices, open_app_settings, open_settings_action, start_app,
-    AppInfo, CaptureResult, DeviceInfo, SYSTEM_SETTINGS,
+    input_key, install_apk, list_apps, list_devices, open_app_settings, open_settings_action,
+    set_auto_brightness, set_brightness, start_app,
+    uninstall_app, AppInfo, CaptureResult, DeviceInfo, SYSTEM_SETTINGS,
 };
 use crate::live::{self, LiveControl, LiveEvent};
 use crate::record::{self, ReplayMsg};
@@ -392,12 +393,21 @@ fn draw_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     };
     match icon {
         Icon::Back => {
-            // iOS-style back chevron: one clean left-pointing fold with rounded
-            // joins/caps. Two arms meet at the left tip and open to the right.
+            // Horizontal rod (arrow tail) pointing right, plus a compact
+            // left-facing arrowhead at its left end. The head is kept small:
+            // it opens narrowly from the rod end to a short tip on the left.
             let at = |nx: f32, ny: f32| Pos2::new(c.x + nx * s, c.y + ny * s);
-            let tip = at(-0.42, 0.0);
+            let rod_end_x = 0.04;
+            p.line_segment(
+                [at(0.58, 0.0), at(rod_end_x, 0.0)],
+                stroke,
+            );
             p.add(egui::Shape::line(
-                vec![at(0.40, -0.28), tip, at(0.40, 0.28)],
+                vec![
+                    at(rod_end_x, -0.16),
+                    at(-0.36, 0.0),
+                    at(rod_end_x, 0.16),
+                ],
                 stroke,
             ));
         }
@@ -1184,6 +1194,12 @@ impl UiViewerApp {
             ui.selectable_value(&mut self.pan_tab, "设备".to_string(), "设备信息");
             ui.selectable_value(&mut self.pan_tab, "应用".to_string(), "应用");
             ui.selectable_value(&mut self.pan_tab, "设置".to_string(), "系统设置");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("↻ 刷新").clicked() {
+                    self.panel_loaded = false;
+                    self.panel_refresh();
+                }
+            });
         });
         ui.add_space(4.0);
         ui.separator();
@@ -1195,13 +1211,15 @@ impl UiViewerApp {
     }
 
     fn render_device_tab(&mut self, ui: &mut egui::Ui) {
+        ui.weak("设备基本信息");
+        ui.add_space(2.0);
         if let Some(d) = &self.device {
             egui::Grid::new("dev_info")
                 .num_columns(2)
-                .spacing([14.0, 6.0])
+                .spacing([18.0, 8.0])
                 .show(ui, |ui| {
                     let mut row = |k: &str, v: String| {
-                        ui.strong(k);
+                        ui.weak(format!("{k}："));
                         ui.label(v);
                         ui.end_row();
                     };
@@ -1212,12 +1230,18 @@ impl UiViewerApp {
                         if d.android.is_empty() {
                             "?".to_string()
                         } else {
-                            format!("Android {} (SDK {})", d.android, d.sdk)
+                            format!("Android {} (API {})", d.android, d.sdk)
                         },
                     );
                     row("分辨率", d.resolution.clone());
                     row("DPI", d.density.clone());
                     row("电量", d.battery.clone());
+                    if !d.storage.is_empty() {
+                        row("存储", d.storage.clone());
+                    }
+                    if !d.build.is_empty() {
+                        row("软件版本", d.build.clone());
+                    }
                     if !d.serial.is_empty() {
                         row("序列号", d.serial.clone());
                     }
@@ -1226,29 +1250,15 @@ impl UiViewerApp {
             let msg = if self.panel_rx.is_some() {
                 "设备信息加载中…"
             } else {
-                "设备信息为空（请先连接设备并点击刷新）"
+                "设备信息为空（请先连接设备，或点击右上角「刷新」）"
             };
             ui.label(msg);
-        }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.strong("安装 APK");
-        ui.add_space(2.0);
-        if ui.button("选择 APK 并安装").clicked() {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("APK", &["apk"])
-                .pick_file()
-            {
-                self.panel_install_apk(path.display().to_string());
-            }
-        }
-        if let Some(r) = &self.install_result {
-            ui.add_space(2.0);
-            ui.label(r);
         }
     }
 
     fn render_apps_tab(&mut self, ui: &mut egui::Ui) {
+        ui.weak("应用列表 · 「●」表示正在运行");
+        ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.app_filter, "third".to_string(), "三方");
             ui.selectable_value(&mut self.app_filter, "all".to_string(), "全部");
@@ -1321,6 +1331,14 @@ impl UiViewerApp {
                 if ui.button("⚙ 详情").clicked() {
                     open_app_settings(&self.adb_path, &serial, &pkg);
                 }
+                let is_third = self.apps.iter().any(|a| a.package == pkg && a.third_party);
+                if ui.add_enabled(is_third, egui::Button::new("🗑 卸载")).clicked() {
+                    let r = uninstall_app(&self.adb_path, &serial, &pkg);
+                    self.install_result = Some(r);
+                    self.sel_pkg = None;
+                    self.app_props = None;
+                    self.panel_refresh();
+                }
             });
             if let Some(props) = &self.app_props {
                 ui.separator();
@@ -1341,14 +1359,96 @@ impl UiViewerApp {
                     });
             }
         }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.weak("安装应用 · 从本地选择 APK 安装到设备");
+        ui.add_space(2.0);
+        if ui.button("选择 APK 并安装").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("APK", &["apk"])
+                .pick_file()
+            {
+                self.panel_install_apk(path.display().to_string());
+            }
+        }
+        if let Some(r) = &self.install_result {
+            ui.add_space(2.0);
+            ui.label(r);
+        }
     }
 
     fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
         let serial = self.target_serial();
-        for (name, action) in SYSTEM_SETTINGS {
-            if ui.button(*name).clicked() {
-                open_settings_action(&self.adb_path, &serial, action);
+        ui.add_space(2.0);
+        ui.weak("系统设置直达 · 一跳进入系统对应设置页");
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            for (name, action) in SYSTEM_SETTINGS {
+                if ui.button(*name).clicked() {
+                    open_settings_action(&self.adb_path, &serial, action);
+                }
             }
+        });
+        ui.add_space(8.0);
+        ui.separator();
+        ui.weak("设备快捷操作 · 直接向设备注入按键/调节");
+        egui::ScrollArea::vertical()
+            .id_source("settings_actions")
+            .max_height(190.0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    // Android keycodes for the common navigation keys.
+                    if ui.button("🔒 锁屏/息屏").clicked() {
+                        input_key(&self.adb_path, &serial, "26");
+                    }
+                    if ui.button("⌂ 主页").clicked() {
+                        input_key(&self.adb_path, &serial, "3");
+                    }
+                    if ui.button("◀ 返回").clicked() {
+                        input_key(&self.adb_path, &serial, "4");
+                    }
+                    if ui.button("▤ 最近任务").clicked() {
+                        input_key(&self.adb_path, &serial, "187");
+                    }
+                    if ui.button("菜单").clicked() {
+                        input_key(&self.adb_path, &serial, "82");
+                    }
+                });
+                ui.add_space(6.0);
+                ui.weak("音量");
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("音量 −").clicked() {
+                        input_key(&self.adb_path, &serial, "25");
+                    }
+                    if ui.button("音量 ＋").clicked() {
+                        input_key(&self.adb_path, &serial, "24");
+                    }
+                    if ui.button("静音/振动").clicked() {
+                        input_key(&self.adb_path, &serial, "164"); // VOLUME_MUTE
+                    }
+                });
+                ui.add_space(6.0);
+                ui.weak("亮度");
+                ui.horizontal_wrapped(|ui| {
+                    for (label, v) in [("25%", 64u16), ("50%", 128), ("75%", 191), ("100%", 255)] {
+                        if ui.button(label).clicked() {
+                            let r = set_brightness(&self.adb_path, &serial, v);
+                            self.install_result = Some(r);
+                        }
+                    }
+                    if ui.button("自动").clicked() {
+                        let r = set_auto_brightness(&self.adb_path, &serial, true);
+                        self.install_result = Some(r);
+                    }
+                    if ui.button("手动").clicked() {
+                        let r = set_auto_brightness(&self.adb_path, &serial, false);
+                        self.install_result = Some(r);
+                    }
+                });
+            });
+        if let Some(r) = &self.install_result {
+            ui.add_space(4.0);
+            ui.label(r);
         }
     }
 }
@@ -1427,19 +1527,28 @@ impl eframe::App for UiViewerApp {
         }
 
         // Drain left-panel background results (device info / app list / props).
-        if self.panel_rx.is_some() {
-            let mut drained = false;
-            while !drained {
-                match self.panel_rx.as_ref().unwrap().try_recv() {
+        if let Some(rx) = self.panel_rx.take() {
+            let mut keep = true;
+            loop {
+                match rx.try_recv() {
                     Ok(PanelMsg::Device(d)) => self.device = Some(d),
                     Ok(PanelMsg::Apps(a)) => self.apps = a,
                     Ok(PanelMsg::Props(p)) => self.app_props = Some(p),
                     Ok(PanelMsg::Install(r)) => self.install_result = Some(r),
-                    Err(std::sync::mpsc::TryRecvError::Empty)
-                    | Err(std::sync::mpsc::TryRecvError::Disconnected) => drained = true,
+                    // Not ready yet: background threads may still be sending.
+                    // Keep the receiver for the next frame instead of dropping
+                    // it — dropping here silently loses the pending messages.
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    // All senders have finished: release the receiver.
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        keep = false;
+                        break;
+                    }
                 }
             }
-            self.panel_rx = None;
+            if keep {
+                self.panel_rx = Some(rx);
+            }
             ctx.request_repaint();
         }
 

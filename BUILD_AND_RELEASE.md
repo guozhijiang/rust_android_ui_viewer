@@ -54,6 +54,15 @@ exe **不包含** scrcpy 的 `scrcpy-server` 与 FFmpeg 的 `avcodec-62.dll` / `
 
 手动装 scrcpy 也可：<https://github.com/Genymobile/scrcpy/releases>（取 `scrcpy-win64-v4.0.zip` 解压，记下目录填到界面即可）。
 
+### 1.4 关于 u2.jar 依赖（可选，用于快速抓取）
+「抓取 / 实时刷新 / 录制回放」的 UI 层级**优先**走 u2（uiautomator2）快速接口；`u2_core.jar` 同样**不进 exe、不进 zip**，按以下顺序定位：
+
+1. 界面「配置」里显式填写的 jar 路径
+2. 默认缓存位置 `%USERPROFILE%\.u2\u2_core.jar`
+3. 都找不到时回退到 `adb shell uiautomator dump`（部分 Android 15+/真机上该命令可能失败）
+
+因此发布的 exe 包无需附带 jar；需要时把 `u2_core.jar`（来自 `openatx/android-uiautomator-server-jar` 的 `assets/u2.jar`，v0.4.0）放到上述默认位置即可。
+
 ---
 
 ## 2. CI 自动构建并发布（推荐）
