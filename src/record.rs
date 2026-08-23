@@ -14,7 +14,6 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::adb;
 use crate::ui_tree::{parse, Node};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -266,6 +265,7 @@ pub enum ReplayMsg {
 fn resolve(
     adb_path: &str,
     serial: &str,
+    u2: Option<&crate::u2::U2>,
     sel: &Option<UiSelector>,
     fx: f32,
     fy: f32,
@@ -274,7 +274,7 @@ fn resolve(
 ) -> (Option<(i32, i32)>, bool) {
     if let Some(sel) = sel {
         for _ in 0..tries {
-            if let Ok(xml) = adb::dump_ui_serial(adb_path, serial) {
+            if let Ok(xml) = crate::u2::fetch_hierarchy(adb_path, serial, u2, 1200) {
                 if let Ok(tree) = parse(&xml) {
                     if let Some(c) = find_center(&tree, sel) {
                         return (Some(c), true);
@@ -296,6 +296,7 @@ fn resolve(
 pub fn replay(
     adb_path: &str,
     serial: &str,
+    u2: Option<&crate::u2::U2>,
     steps: &[RecordStep],
     status: &Sender<ReplayMsg>,
     opts: &ReplayOpts,
@@ -329,6 +330,7 @@ pub fn replay(
                     let (pt, ok) = resolve(
                         adb_path,
                         serial,
+                        u2,
                         &step.selector,
                         step.fx.unwrap_or(0.5),
                         step.fy.unwrap_or(0.5),
@@ -350,6 +352,7 @@ pub fn replay(
                     let (s, ok_s) = resolve(
                         adb_path,
                         serial,
+                        u2,
                         &step.from_selector,
                         step.from_fx.unwrap_or(0.5),
                         step.from_fy.unwrap_or(0.5),
@@ -359,6 +362,7 @@ pub fn replay(
                     let (e, ok_e) = resolve(
                         adb_path,
                         serial,
+                        u2,
                         &step.to_selector,
                         step.to_fx.unwrap_or(0.5),
                         step.to_fy.unwrap_or(0.5),
@@ -376,6 +380,7 @@ pub fn replay(
                     let (pt, ok) = resolve(
                         adb_path,
                         serial,
+                        u2,
                         &step.selector,
                         step.fx.unwrap_or(0.5),
                         step.fy.unwrap_or(0.5),

@@ -93,7 +93,7 @@ impl Node {
 
 fn parse_bounds(s: &str) -> Option<Bounds> {
     let nums: Vec<i32> = s
-        .split(|c: char| c == '[' || c == ']' || c == ',')
+        .split(['[', ']', ','])
         .filter_map(|p| p.trim().parse::<i32>().ok())
         .collect();
     if nums.len() == 4 {

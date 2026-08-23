@@ -8,11 +8,11 @@ fn main() {
     let avcodec = unsafe { libloading::Library::new(dir.join("avcodec-62.dll")) };
     let avutil = unsafe { libloading::Library::new(dir.join("avutil-60.dll")) };
     match &avcodec {
-        Ok(l) => println!("avcodec-62 loaded OK"),
+        Ok(_l) => println!("avcodec-62 loaded OK"),
         Err(e) => println!("avcodec-62 load ERR: {e}"),
     }
     match &avutil {
-        Ok(l) => println!("avutil-60 loaded OK"),
+        Ok(_l) => println!("avutil-60 loaded OK"),
         Err(e) => println!("avutil-60 load ERR: {e}"),
     }
     if let Ok(avutil) = &avutil {

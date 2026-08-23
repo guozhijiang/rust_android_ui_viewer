@@ -8,4 +8,5 @@ pub mod live;
 pub mod log;
 pub mod record;
 pub mod scrcpy;
+pub mod u2;
 pub mod ui_tree;

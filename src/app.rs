@@ -12,7 +12,11 @@ use eframe::egui::{
 };
 use egui::PointerButton;
 
-use crate::adb::{capture_serial, dump_ui, dump_ui_serial, list_devices, CaptureResult};
+use crate::adb::{
+    app_properties, capture_serial, clear_app, device_info, dump_ui, dump_ui_serial, force_stop,
+    install_apk, list_apps, list_devices, open_app_settings, open_settings_action, start_app,
+    AppInfo, CaptureResult, DeviceInfo, SYSTEM_SETTINGS,
+};
 use crate::live::{self, LiveControl, LiveEvent};
 use crate::record::{self, ReplayMsg};
 use crate::ui_tree::Node;
@@ -32,6 +36,25 @@ fn file_timestamp() -> String {
     let (h, m, s) = (sod / 3600, (sod % 3600) / 60, sod % 60);
     let (y, mo, d) = ymd_from_days(days);
     format!("{y:04}{mo:02}{d:02}_{h:02}{m:02}{s:02}")
+}
+
+/// Default location of the on-device u2 server jar, if present. Picking this
+/// as the pre-filled path means the user can hit "推送并启动" right away.
+/// Only returns a path if the file actually exists (so an empty value prompts
+/// the user to pick one explicitly instead of failing the push silently).
+fn default_u2_jar() -> String {
+    let home = std::env::var_os("USERPROFILE").map(|p| p.to_string_lossy().into_owned());
+    let cand = home
+        .map(|p| {
+            let root = p.trim_end_matches(['\\', '/']);
+            format!(r"{root}\.u2\u2_core.jar")
+        })
+        .unwrap_or_default();
+    if std::path::Path::new(&cand).is_file() {
+        cand
+    } else {
+        String::new()
+    }
 }
 
 fn ymd_from_days(mut days: i64) -> (i64, i64, i64) {
@@ -60,7 +83,7 @@ fn ymd_from_days(mut days: i64) -> (i64, i64, i64) {
         d -= md;
         mo += 1;
     }
-    (y, mo as i64 + 1, d as i64 + 1)
+    (y, mo as i64 + 1, d + 1)
 }
 
 /// A press gesture on the live screen being tracked for tap/swipe detection.
@@ -250,6 +273,49 @@ pub struct UiViewerApp {
     replay_current: Option<usize>,
     /// Indices of replay steps that failed to resolve on the device.
     replay_failed: Vec<usize>,
+
+    // ---- Device + app management panel (shown in operate mode) ----
+    /// Active tab in the left panel: "设备" | "应用" | "设置".
+    pan_tab: String,
+    /// Filter for the app list: all | system | third | running.
+    app_filter: String,
+    app_search: String,
+    apps: Vec<AppInfo>,
+    device: Option<DeviceInfo>,
+    /// Package currently selected (shows its props / action buttons).
+    sel_pkg: Option<String>,
+    /// Cached text dump of the selected package's properties.
+    app_props: Option<String>,
+    /// One-shot flag so a refresh only fires once per entry into operate mode.
+    panel_loaded: bool,
+    /// Receiver for slow panel data produced in the background.
+    panel_rx: Option<Receiver<PanelMsg>>,
+    /// Text shown under the install button after an install attempt.
+    install_result: Option<String>,
+
+    // ---- u2 (uiautomator2 fast-hierarchy) integration ----
+    /// Host-side path to the u2 jar the user points at; empty = disabled.
+    u2_jar: String,
+    /// Live handle to a started u2 server on the device (through adb forward).
+    u2: Option<crate::u2::U2>,
+    /// Last status text for the u2 connect attempt.
+    u2_status: Option<String>,
+    /// Result channel for the background u2 connect attempt.
+    u2_rx: Option<Receiver<anyhow::Result<bool>>>,
+    /// True once we have auto-attempted to start u2 (one try per launch), so a
+    /// missing device or transient failure does not trigger repeated attempts.
+    u2_auto_attempted: bool,
+
+    // ---- Appearance ----
+    /// System dark-mode captured on the first frame (the app follows the OS
+    /// theme automatically; not user-configurable).
+    system_dark: bool,
+    /// Whether `system_dark` has been captured yet.
+    system_theme_captured: bool,
+    /// Whether the one-time look (theme + density) has been applied. Applying
+    /// it every frame allocates a new Style and churns egui's caching, which
+    /// measurably stutters the live-stream operate mode — so it runs once.
+    look_applied: bool,
 }
 
 /// Icons drawn with the painter so they render identically everywhere
@@ -265,6 +331,14 @@ enum Icon {
     End,
 }
 
+/// Background results produced for the left device/app-management panel.
+enum PanelMsg {
+    Device(crate::adb::DeviceInfo),
+    Apps(Vec<crate::adb::AppInfo>),
+    Props(String),
+    Install(String),
+}
+
 /// Draw a filled badge with text at `pos` (top-left), used for prominent
 /// recording / replaying indicators over the live image.
 fn draw_badge(p: &egui::Painter, pos: Pos2, text: &str, color: Color32) {
@@ -275,6 +349,33 @@ fn draw_badge(p: &egui::Painter, pos: Pos2, text: &str, color: Color32) {
     let rect = Rect::from_min_size(pos, size);
     p.rect_filled(rect, 6.0, color);
     p.galley(rect.min + egui::vec2(8.0, 5.0), galley, Color32::WHITE);
+}
+
+/// Theme-aware palette driving the "card panels over a canvas" look.
+/// A single source of truth so light/dark switch consistently everywhere.
+fn c_card(dark: bool) -> Color32 {
+    if dark { Color32::from_rgb(27, 27, 32) } else { Color32::from_rgb(255, 255, 255) }
+}
+fn c_canvas(dark: bool) -> Color32 {
+    if dark { Color32::from_rgb(15, 15, 20) } else { Color32::from_rgb(236, 239, 245) }
+}
+fn c_border(dark: bool) -> Color32 {
+    if dark { Color32::from_rgb(50, 50, 58) } else { Color32::from_rgb(216, 221, 231) }
+}
+fn c_accent(dark: bool) -> Color32 {
+    if dark { Color32::from_rgb(130, 150, 255) } else { Color32::from_rgb(86, 106, 248) }
+}
+fn c_accent_soft(dark: bool) -> Color32 {
+    if dark { Color32::from_rgba_unmultiplied(130, 150, 255, 26) } else { Color32::from_rgba_unmultiplied(86, 106, 248, 28) }
+}
+/// Rounded, bordered "card" frame used for the top bar and side panels.
+fn card_frame(dark: bool) -> egui::Frame {
+    egui::Frame::none()
+        .fill(c_card(dark))
+        .rounding(egui::Rounding::same(8.0))
+        .stroke(Stroke::new(1.0, c_border(dark)))
+        .inner_margin(egui::Margin::same(6.0))
+        .outer_margin(egui::Margin::same(2.0))
 }
 
 /// Draw a 28px-ish icon centered in `rect`.
@@ -291,11 +392,14 @@ fn draw_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     };
     match icon {
         Icon::Back => {
-            // Standard "back" glyph: a left-pointing arrow. Shaft goes from
-            // right to left, arrowhead on the left (points left).
-            seg((-0.42, 0.20), (0.42, 0.20)); // shaft
-            seg((-0.42, 0.20), (-0.20, 0.02)); // arrowhead upper
-            seg((-0.42, 0.20), (-0.20, 0.38)); // arrowhead lower
+            // iOS-style back chevron: one clean left-pointing fold with rounded
+            // joins/caps. Two arms meet at the left tip and open to the right.
+            let at = |nx: f32, ny: f32| Pos2::new(c.x + nx * s, c.y + ny * s);
+            let tip = at(-0.42, 0.0);
+            p.add(egui::Shape::line(
+                vec![at(0.40, -0.28), tip, at(0.40, 0.28)],
+                stroke,
+            ));
         }
         Icon::Home => {
             // roof
@@ -471,6 +575,24 @@ impl UiViewerApp {
             hier_quiet: false,
             replay_current: None,
             replay_failed: Vec::new(),
+            pan_tab: "设备".to_string(),
+            app_filter: "third".to_string(),
+            app_search: String::new(),
+            apps: Vec::new(),
+            device: None,
+            sel_pkg: None,
+            app_props: None,
+            panel_loaded: false,
+            panel_rx: None,
+            install_result: None,
+            u2_jar: default_u2_jar(),
+            u2: None,
+            u2_status: None,
+            u2_rx: None,
+            u2_auto_attempted: false,
+            system_dark: false,
+            system_theme_captured: false,
+            look_applied: false,
         };
         // Populate the device list up front so the config window (open by
         // default) immediately shows what `adb devices` reports.
@@ -504,6 +626,66 @@ impl UiViewerApp {
         ctx.set_fonts(fonts);
     }
 
+    /// Apply the chosen theme (light/dark/follow-system) and UI density on
+    /// every frame. "Follow system" re-uses the dark-mode value egui picked at
+    /// startup (egui 0.27 exposes no live OS-theme API, so we capture it once).
+    fn apply_look(&mut self, ctx: &egui::Context) {
+        // Apply once — re-running each frame just re-allocates the Style and
+        // forces egui to re-reshape text every frame (stutters the live video).
+        if self.look_applied {
+            return;
+        }
+        if !self.system_theme_captured {
+            self.system_theme_captured = true;
+            self.system_dark = ctx.style().visuals.dark_mode;
+        }
+        let dark = self.system_dark;
+        let mut visuals = if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+        let accent = c_accent(dark);
+        // Text color rendered ON the accent fill (selected/pressed states).
+        let on_accent = if dark { Color32::from_rgb(18, 18, 26) } else { Color32::WHITE };
+        // Distinct "canvas" base with cards floating on top + brand accent.
+        visuals.panel_fill = c_canvas(dark);
+        visuals.window_fill = c_card(dark);
+        visuals.window_stroke = Stroke::new(1.0, c_border(dark));
+        visuals.selection.bg_fill = accent;
+        visuals.selection.stroke = Stroke::new(1.0, on_accent);
+        visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
+        visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
+        visuals.widgets.active.rounding = egui::Rounding::same(6.0);
+        visuals.widgets.hovered.weak_bg_fill = c_accent_soft(dark);
+        // Selected/pressed widgets (e.g. the mode switch) get a solid brand-blue
+        // fill with a readable, contrasting text color.
+        visuals.widgets.active.weak_bg_fill = accent;
+        visuals.widgets.active.fg_stroke = Stroke::new(1.0, on_accent);
+        // Make text-edit fields clearly visible against the white card frame —
+        // egui's default field fill is white, which vanishes on the card, so
+        // give it a tinted fill plus a defined border (inactive=read-only,
+        // active=focused). This covers the operate-mode text input and the
+        // config window's ADB/scrcpy path fields.
+        let field_bg = if dark { Color32::from_rgb(42, 42, 50) } else { Color32::from_rgb(245, 246, 250) };
+        let field_bd = if dark { Color32::from_rgb(72, 72, 84) } else { Color32::from_rgb(178, 183, 194) };
+        let field_bd_h = if dark { Color32::from_rgb(92, 92, 106) } else { Color32::from_rgb(150, 155, 168) };
+        visuals.extreme_bg_color = field_bg;
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, field_bd);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, field_bd_h);
+        visuals.widgets.open.bg_stroke = Stroke::new(1.0, field_bd);
+        // Focused field gets an accent border for a clear active state.
+        visuals.widgets.active.bg_stroke = Stroke::new(1.5, accent);
+        let mut style = (*ctx.style()).clone();
+        style.visuals = visuals;
+        // Fixed "normal" density (not user-configurable).
+        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+        style.spacing.button_padding = Vec2::new(6.0, 3.0);
+        style.spacing.interact_size.y = 22.0;
+        ctx.set_style(std::sync::Arc::new(style));
+        self.look_applied = true;
+    }
+
     fn load_screenshot(&mut self, ctx: &egui::Context, bytes: &[u8]) -> anyhow::Result<()> {
         let img = image::load_from_memory(bytes)
             .map_err(|e| anyhow::anyhow!(e))?
@@ -516,6 +698,20 @@ impl UiViewerApp {
         self.image_size = Some((w, h));
         self.last_screenshot = Some(bytes.to_vec());
         Ok(())
+    }
+
+    /// The serial to target for left-panel (device/app/settings) operations.
+    /// Prefers the connected live session, then the user-selected device, then
+    /// the first device on the bus — so the panel still works before/without a
+    /// live (scrcpy) session. Empty means "adb default device".
+    fn target_serial(&self) -> String {
+        if !self.live_serial.is_empty() {
+            self.live_serial.clone()
+        } else if !self.live_serial_hint.trim().is_empty() {
+            self.live_serial_hint.clone()
+        } else {
+            self.devices.first().cloned().unwrap_or_default()
+        }
     }
 
     /// Refresh the list of connected, authorized devices via `adb devices`.
@@ -544,15 +740,18 @@ impl UiViewerApp {
         let adb = self.adb_path.clone();
         // Target the device chosen in live-control mode; empty = default device.
         let serial = self.live_serial_hint.clone();
+        let u2 = self.u2.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
             let res = (|| -> anyhow::Result<CaptureResult> {
                 let screenshot = capture_serial(&adb, &serial)?;
-                let xml = if serial.is_empty() {
-                    dump_ui(&adb)?
-                } else {
-                    dump_ui_serial(&adb, &serial)?
+                // Prefer the u2 fast hierarchy when available; it works on
+                // devices where `uiautomator dump` does not (e.g. Android 16).
+                let xml = match u2.as_ref() {
+                    Some(srv) => crate::u2::fetch_hierarchy(&adb, &serial, Some(srv), 1600)?,
+                    None if serial.is_empty() => dump_ui(&adb)?,
+                    None => dump_ui_serial(&adb, &serial)?,
                 };
                 Ok(CaptureResult { screenshot, xml })
             })();
@@ -764,6 +963,7 @@ impl UiViewerApp {
         self.replay_failed.clear();
         let adb = self.adb_path.clone();
         let serial = self.live_serial.clone();
+        let u2 = self.u2.clone();
         let opts = record::ReplayOpts {
             speed: self.replay_speed,
             loops: self.replay_loops,
@@ -771,7 +971,7 @@ impl UiViewerApp {
         let (tx, rx) = std::sync::mpsc::channel::<ReplayMsg>();
         self.record_rx = Some(rx);
         std::thread::spawn(move || {
-            record::replay(&adb, &serial, &steps, &tx, &opts);
+            record::replay(&adb, &serial, u2.as_ref(), &steps, &tx, &opts);
         });
         self.status = "回放中…".to_string();
     }
@@ -886,23 +1086,277 @@ impl UiViewerApp {
     fn spawn_hierarchy_dump(&mut self) {
         let adb = self.adb_path.clone();
         let serial = self.live_serial.clone();
+        let u2 = self.u2.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.xml_rx = Some(rx);
+        let u2_on = u2.is_some();
         std::thread::spawn(move || {
-            let res = (|| -> anyhow::Result<String> {
+            let res = if let Some(srv) = u2.as_ref() {
+                match crate::u2::fetch_hierarchy(&adb, &serial, Some(srv), 1500) {
+                    Ok(x) => {
+                        crate::log::info!("dump: u2 OK len={}", x.len());
+                        Ok(x)
+                    }
+                    Err(e) => {
+                        crate::log::warn!("dump: u2 failed ({e}); falling back to adb dump");
+                        if serial.is_empty() {
+                            dump_ui(&adb)
+                        } else {
+                            dump_ui_serial(&adb, &serial)
+                        }
+                    }
+                }
+            } else {
+                crate::log::warn!("dump: u2 NOT available (u2_on={u2_on}); using adb dump");
                 if serial.is_empty() {
                     dump_ui(&adb)
                 } else {
                     dump_ui_serial(&adb, &serial)
                 }
-            })();
+            };
             let _ = tx.send(res);
         });
+    }
+
+    // ---- Left panel: device / app management (background refresh) ----
+    /// Kick off background fetches for device info + the full app list.
+    fn panel_refresh(&mut self) {
+        let adb = self.adb_path.clone();
+        let serial = self.target_serial();
+        let (tx, rx) = std::sync::mpsc::channel::<PanelMsg>();
+        self.panel_rx = Some(rx);
+        let t = tx.clone();
+        let (adb2, serial2) = (adb.clone(), serial.clone());
+        std::thread::spawn(move || {
+            let d = device_info(&adb, &serial);
+            let _ = t.send(PanelMsg::Device(d));
+        });
+        std::thread::spawn(move || {
+            let apps = list_apps(&adb2, &serial2, "all");
+            let _ = tx.send(PanelMsg::Apps(apps));
+        });
+    }
+
+    /// Fetch a single package's properties in the background.
+    fn panel_props(&mut self, pkg: String) {
+        let adb = self.adb_path.clone();
+        let serial = self.target_serial();
+        let (tx, rx) = std::sync::mpsc::channel::<PanelMsg>();
+        self.panel_rx = Some(rx);
+        std::thread::spawn(move || {
+            let props = app_properties(&adb, &serial, &pkg);
+            let _ = tx.send(PanelMsg::Props(props));
+        });
+    }
+
+    /// Kick off a background attempt to push + start the on-device u2 server.
+    fn try_connect_u2(&mut self) {
+        let jar = self.u2_jar.clone();
+        let adb = self.adb_path.clone();
+        let serial = self.target_serial();
+        let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<bool>>();
+        self.u2_rx = Some(rx);
+        self.u2_status = Some("正在推送并启动 u2（可能需要几秒）…".to_string());
+        std::thread::spawn(move || {
+            let res = crate::u2::start(&adb, &serial, &jar, crate::u2::DEFAULT_PORT);
+            let _ = tx.send(res);
+        });
+    }
+
+    /// Install the selected APK in the background, reporting the result via the
+    /// panel channel so the UI thread never blocks on a long `adb install -r`.
+    fn panel_install_apk(&mut self, path: String) {
+        self.install_result = Some("正在安装…".to_string());
+        let adb = self.adb_path.clone();
+        let serial = self.target_serial();
+        let (tx, rx) = std::sync::mpsc::channel::<PanelMsg>();
+        self.panel_rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = install_apk(&adb, &serial, &path)
+                .unwrap_or_else(|e| format!("安装失败: {e}"));
+            let _ = tx.send(PanelMsg::Install(result));
+        });
+    }
+
+    // ---- Left-panel UI (operate mode): device info / apps / settings ----
+    fn render_dev_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.pan_tab, "设备".to_string(), "设备信息");
+            ui.selectable_value(&mut self.pan_tab, "应用".to_string(), "应用");
+            ui.selectable_value(&mut self.pan_tab, "设置".to_string(), "系统设置");
+        });
+        ui.add_space(4.0);
+        ui.separator();
+        match self.pan_tab.as_str() {
+            "设备" => self.render_device_tab(ui),
+            "应用" => self.render_apps_tab(ui),
+            _ => self.render_settings_tab(ui),
+        }
+    }
+
+    fn render_device_tab(&mut self, ui: &mut egui::Ui) {
+        if let Some(d) = &self.device {
+            egui::Grid::new("dev_info")
+                .num_columns(2)
+                .spacing([14.0, 6.0])
+                .show(ui, |ui| {
+                    let mut row = |k: &str, v: String| {
+                        ui.strong(k);
+                        ui.label(v);
+                        ui.end_row();
+                    };
+                    row("机型", d.model.clone());
+                    row("品牌", d.brand.clone());
+                    row(
+                        "系统",
+                        if d.android.is_empty() {
+                            "?".to_string()
+                        } else {
+                            format!("Android {} (SDK {})", d.android, d.sdk)
+                        },
+                    );
+                    row("分辨率", d.resolution.clone());
+                    row("DPI", d.density.clone());
+                    row("电量", d.battery.clone());
+                    if !d.serial.is_empty() {
+                        row("序列号", d.serial.clone());
+                    }
+                });
+        } else {
+            let msg = if self.panel_rx.is_some() {
+                "设备信息加载中…"
+            } else {
+                "设备信息为空（请先连接设备并点击刷新）"
+            };
+            ui.label(msg);
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.strong("安装 APK");
+        ui.add_space(2.0);
+        if ui.button("选择 APK 并安装").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("APK", &["apk"])
+                .pick_file()
+            {
+                self.panel_install_apk(path.display().to_string());
+            }
+        }
+        if let Some(r) = &self.install_result {
+            ui.add_space(2.0);
+            ui.label(r);
+        }
+    }
+
+    fn render_apps_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.app_filter, "third".to_string(), "三方");
+            ui.selectable_value(&mut self.app_filter, "all".to_string(), "全部");
+            ui.selectable_value(&mut self.app_filter, "system".to_string(), "系统");
+            ui.selectable_value(&mut self.app_filter, "running".to_string(), "运行中");
+        });
+        ui.add_space(2.0);
+        ui.add(egui::TextEdit::singleline(&mut self.app_search).hint_text("搜索包名…"));
+        ui.add_space(4.0);
+
+        let q = self.app_search.to_lowercase();
+        let filter = self.app_filter.clone();
+        let mut shown = 0usize;
+        let mut click: Option<String> = None;
+        egui::ScrollArea::vertical()
+            .id_source("app_list")
+            .auto_shrink([false, false])
+            .max_height(300.0)
+            .show(ui, |ui| {
+                for a in &self.apps {
+                    let ok = match filter.as_str() {
+                        "third" => a.third_party,
+                        "system" => !a.third_party,
+                        "running" => a.running,
+                        _ => true,
+                    };
+                    if !ok {
+                        continue;
+                    }
+                    if !q.is_empty() && !a.package.to_lowercase().contains(&q) {
+                        continue;
+                    }
+                    shown += 1;
+                    let selected = self.sel_pkg.as_deref() == Some(a.package.as_str());
+                    let text = if a.running {
+                        format!("{}  ●", a.package)
+                    } else {
+                        a.package.clone()
+                    };
+                    if ui.selectable_label(selected, text).clicked() {
+                        click = Some(a.package.clone());
+                    }
+                }
+                if shown == 0 {
+                    ui.label("没有匹配的应用。");
+                }
+            });
+        if let Some(pkg) = click {
+            self.sel_pkg = Some(pkg.clone());
+            self.app_props = None;
+            self.panel_props(pkg);
+        }
+        ui.label(format!("本屏 {} 个应用", shown));
+
+        if let Some(pkg) = self.sel_pkg.clone() {
+            let serial = self.target_serial();
+            ui.separator();
+            ui.strong(&pkg);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("▶ 启动").clicked() {
+                    start_app(&self.adb_path, &serial, &pkg);
+                }
+                if ui.button("■ 停止").clicked() {
+                    force_stop(&self.adb_path, &serial, &pkg);
+                }
+                if ui.button("清数据").clicked() {
+                    let r = clear_app(&self.adb_path, &serial, &pkg);
+                    self.install_result = Some(r);
+                }
+                if ui.button("⚙ 详情").clicked() {
+                    open_app_settings(&self.adb_path, &serial, &pkg);
+                }
+            });
+            if let Some(props) = &self.app_props {
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_source("app_props")
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        let dark = ui.visuals().dark_mode;
+                        ui.label(
+                            egui::RichText::new(props.clone())
+                                .monospace()
+                                .color(if dark {
+                                    Color32::from_rgb(200, 205, 220)
+                                } else {
+                                    Color32::from_rgb(30, 33, 42)
+                                }),
+                        );
+                    });
+            }
+        }
+    }
+
+    fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
+        let serial = self.target_serial();
+        for (name, action) in SYSTEM_SETTINGS {
+            if ui.button(*name).clicked() {
+                open_settings_action(&self.adb_path, &serial, action);
+            }
+        }
     }
 }
 
 impl eframe::App for UiViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Apply theme + density first so every panel below uses the chosen look.
+        self.apply_look(ctx);
         // Consume a pending "jump to selected node" request (set on the previous
         // frame when an element was selected). `jump` drives this frame's scroll.
         let jump = self.jump_to.take();
@@ -910,11 +1364,24 @@ impl eframe::App for UiViewerApp {
         // In "查看 UI" mode, auto-capture the screen + hierarchy on first entry
         // (and whenever nothing is loaded yet) so inspection works immediately
         // without a separate Capture click. Gated on being configured first.
+        // Auto-start u2 once on launch if a jar is configured, so capture works
+        // even on devices where `uiautomator dump` is unavailable (Android 16).
+        if self.configured
+            && self.u2.is_none()
+            && !self.u2_auto_attempted
+            && self.u2_rx.is_none()
+            && !self.u2_jar.trim().is_empty()
+        {
+            self.u2_auto_attempted = true;
+            self.try_connect_u2();
+        }
+
         if self.configured
             && !self.op_mode
             && self.tree.is_none()
             && !self.capturing
             && !self.auto_captured
+            && self.u2_rx.is_none() // wait for the auto u2 attempt to settle
         {
             self.auto_captured = true;
             self.start_capture();
@@ -957,6 +1424,51 @@ impl eframe::App for UiViewerApp {
                 }
                 ctx.request_repaint();
             }
+        }
+
+        // Drain left-panel background results (device info / app list / props).
+        if self.panel_rx.is_some() {
+            let mut drained = false;
+            while !drained {
+                match self.panel_rx.as_ref().unwrap().try_recv() {
+                    Ok(PanelMsg::Device(d)) => self.device = Some(d),
+                    Ok(PanelMsg::Apps(a)) => self.apps = a,
+                    Ok(PanelMsg::Props(p)) => self.app_props = Some(p),
+                    Ok(PanelMsg::Install(r)) => self.install_result = Some(r),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                    | Err(std::sync::mpsc::TryRecvError::Disconnected) => drained = true,
+                }
+            }
+            self.panel_rx = None;
+            ctx.request_repaint();
+        }
+
+        // Drain a background u2 connect attempt result.
+        if let Some(rx) = &self.u2_rx {
+            if let Ok(res) = rx.try_recv() {
+                use crate::u2::U2;
+                match res {
+                    Ok(true) => {
+                        self.u2 = Some(U2::new(crate::u2::DEFAULT_PORT));
+                        self.u2_status = Some("✓ u2 已就绪（快速抓树已启用）".to_string());
+                    }
+                    Ok(false) => {
+                        self.u2_status = Some("u2 服务未响应，已回退使用 uiautomator dump".to_string());
+                    }
+                    Err(e) => {
+                        self.u2_status = Some(format!("u2 启动失败: {e}"));
+                    }
+                }
+                self.u2_rx = None;
+                ctx.request_repaint();
+            }
+        }
+
+        // Load the device/app panel once when entering operate mode (works as
+        // soon as a device is available, before/without a live session).
+        if self.op_mode && !self.panel_loaded && !self.target_serial().is_empty() {
+            self.panel_loaded = true;
+            self.panel_refresh();
         }
 
         // While recording, keep the hierarchy fresh in the background so each
@@ -1127,11 +1639,13 @@ impl eframe::App for UiViewerApp {
         }
 
         // ---- Top panel: actions + config toggle + status ----
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+        egui::TopBottomPanel::top("top")
+            .frame(card_frame(ctx.style().visuals.dark_mode))
+            .show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 // Grabbing is automatic when entering "查看 UI", so the top bar
                 // only needs Save (keep screenshot + XML) and Load (screenshot + XML).
-                if ui.button("保持截图和XML").clicked() {
+                if ui.button("保存截图和XML").clicked() {
                     self.save_dump();
                 }
                 if ui.button("加载截图和XML").clicked() {
@@ -1163,6 +1677,32 @@ impl eframe::App for UiViewerApp {
                     Color32::from_rgb(220, 220, 220)
                 };
                 ui.colored_label(status_color, &self.status);
+                // Connection badge (operate mode only).
+                if self.op_mode {
+                    ui.separator();
+                    if self.live_started {
+                        ui.colored_label(Color32::from_rgb(90, 200, 120), "● 已连接")
+                            .on_hover_text("操作会话已连接（实时控制或已回退 adb）");
+                    } else {
+                        ui.colored_label(Color32::from_rgb(228, 150, 140), "○ 未连接")
+                            .on_hover_text("操作会话正在建立或已结束");
+                    }
+                }
+                // Replay progress when a replay is running.
+                if self.replaying {
+                    if let Some(idx) = self.replay_current {
+                        let n = self.steps.len().max(1);
+                        ui.separator();
+                        ui.colored_label(
+                            Color32::from_rgb(230, 160, 60),
+                            format!("回放 {}/{}", idx + 1, n),
+                        );
+                        ui.add(
+                            egui::ProgressBar::new(((idx + 1) as f32 / n as f32).clamp(0.0, 1.0))
+                                .desired_width(140.0),
+                        );
+                    }
+                }
             });
         });
 
@@ -1248,6 +1788,34 @@ impl eframe::App for UiViewerApp {
                         });
                     }
                     ui.separator();
+                    ui.strong("u2 快速抓树（可选）");
+                    if let Some(s) = &self.u2_status {
+                        ui.label(s);
+                    }
+                    ui.label("u2 jar 路径 (core-src.jar):");
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.u2_jar);
+                        if ui.button("浏览…").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .add_filter("Jar", &["jar"])
+                                .pick_file()
+                            {
+                                self.u2_jar = p.display().to_string();
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if self.u2.is_some() {
+                            ui.label("● 已连接");
+                        } else if ui
+                            .add_enabled(!self.u2_jar.trim().is_empty(), egui::Button::new("推送并启动"))
+                            .clicked()
+                        {
+                            self.try_connect_u2();
+                        }
+                    });
+                    ui.weak("不配置时自动使用 uiautomator dump（功能不受影响）");
+                    ui.separator();
                     let ready = self.config_ready();
                     let btn = egui::Button::new("完成配置并进入")
                         .fill(if ready {
@@ -1279,22 +1847,28 @@ impl eframe::App for UiViewerApp {
         // ---- Left panel: element properties (always present so the layout
         // width is constant; content hidden in operate mode) ----
         egui::SidePanel::left("props")
+            .frame(card_frame(ctx.style().visuals.dark_mode))
             .default_width(300.0)
             .min_width(220.0)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.heading("元素属性");
-                    if let Some(id) = self.selected {
+                    ui.heading(if self.op_mode { "设备 / 应用" } else { "元素属性" });
+                    if self.op_mode {
+                        if ui.button("↻ 刷新").clicked() {
+                            self.panel_refresh();
+                        }
+                    } else if let Some(id) = self.selected {
                         ui.weak(format!("id = {id}"));
                     }
                 });
                 if self.op_mode {
                     ui.separator();
-                    ui.centered_and_justified(|ui| {
-                        ui.label("操作模式下不显示元素属性");
-                    });
+                    egui::ScrollArea::vertical()
+                        .id_source("dev_panel")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.render_dev_panel(ui));
                     return;
                 }
                 ui.separator();
@@ -1317,6 +1891,7 @@ impl eframe::App for UiViewerApp {
         // ---- Right panel: full-height hierarchy tree (always present so the
         // layout width is constant; content hidden in operate mode) ----
         egui::SidePanel::right("right")
+            .frame(card_frame(ctx.style().visuals.dark_mode))
             .default_width(560.0)
             .min_width(340.0)
             .resizable(true)
@@ -1600,9 +2175,7 @@ impl eframe::App for UiViewerApp {
                     self.zoom = 1.0;
                 }
                 ui.separator();
-                if self.live_started {
-                    ui.spinner();
-                } else if self.capturing {
+                if self.live_started || self.capturing {
                     ui.spinner();
                 }
             });
@@ -1645,12 +2218,16 @@ impl eframe::App for UiViewerApp {
 
                 // Prominent recording / replaying indicator over the live image.
                 if self.recording {
+                    // Pulsing "REC" so the recording state is unmistakable.
+                    let phase = ((ui.input(|i| i.time) * 2.2).sin() * 0.5 + 0.5) as f32;
+                    let alpha = 120 + (135.0 * phase) as u8;
                     draw_badge(
                         ui.painter(),
                         draw_rect.min + Vec2::new(10.0, 10.0),
                         "● 录制中",
-                        Color32::from_rgb(220, 40, 40),
+                        Color32::from_rgba_unmultiplied(220, 40, 40, alpha),
                     );
+                    ui.ctx().request_repaint_after(Duration::from_millis(90));
                 }
                 if self.replaying {
                     draw_badge(
@@ -1682,7 +2259,7 @@ impl eframe::App for UiViewerApp {
 
                 self.hover_pix = ui
                     .input(|i| i.pointer.hover_pos())
-                    .and_then(|p| to_dev(p));
+                    .and_then(to_dev);
 
                 // Gesture tracking: press -> drag (swipe) or tap / long-press.
                 if ui.input(|i| i.pointer.button_pressed(PointerButton::Primary)) {
@@ -1722,7 +2299,7 @@ impl eframe::App for UiViewerApp {
                     if let Some(g) = self.op_gest.take() {
                         let end = ui
                             .input(|i| i.pointer.interact_pos())
-                            .and_then(|p| to_dev(p));
+                            .and_then(to_dev);
                         let elapsed = g.start_time.elapsed().as_millis();
                         let (sx, sy) = g.start_xy;
                         let lifted = end.unwrap_or((sx, sy));
@@ -1799,7 +2376,7 @@ impl eframe::App for UiViewerApp {
                     if let Some(g) = self.op_gest2.take() {
                         let end = ui
                             .input(|i| i.pointer.interact_pos())
-                            .and_then(|p| to_dev(p));
+                            .and_then(to_dev);
                         let (sx, sy) = g.start_xy;
                         let lifted = end.unwrap_or((sx, sy));
                         if let Some(c) = &self.live_control {
@@ -1866,9 +2443,12 @@ impl eframe::App for UiViewerApp {
                 let max_side_x = viewport.max.x - side_w - 2.0;
                 let side_x = (draw_rect.max.x + gap).min(max_side_x);
                 // Start just below the top of the screen and grow downward,
-                // clamped so the whole column stays inside the viewport.
-                let mut y = (draw_rect.min.y + gap)
-                    .clamp(viewport.min.y + 2.0, viewport.max.y - total_h - 2.0);
+                // clamped so the whole column stays inside the viewport. Use a
+                // safe range: when the column is taller than the viewport, fall
+                // back to the top edge rather than panicking on min > max.
+                let y_min = viewport.min.y + 2.0;
+                let y_max = (viewport.max.y - total_h - 2.0).max(y_min);
+                let mut y = (draw_rect.min.y + gap).clamp(y_min, y_max);
                 for (icon, tip, key) in stack {
                     let r = Rect::from_min_size(Pos2::new(side_x, y), Vec2::new(side_w, side_h));
                     if overlay_button(ui, r, icon, tip) {
@@ -1891,8 +2471,11 @@ impl eframe::App for UiViewerApp {
                 let nav_btn_w = (draw_rect.width() * 0.18).clamp(64.0, 120.0);
                 let nav_total = nav_btn_w * 3.0 + spacing * 2.0;
                 let nav_y = (draw_rect.max.y + gap).min(viewport.max.y - nav_h - 2.0);
-                let nav_x = (draw_rect.center().x - nav_total / 2.0)
-                    .clamp(viewport.min.x + 2.0, viewport.max.x - nav_total - 2.0);
+                // Safe clamp: if the nav bar is wider than the viewport, pin to
+                // the left edge instead of panicking on min > max.
+                let nav_l = viewport.min.x + 2.0;
+                let nav_r = (viewport.max.x - nav_total - 2.0).max(nav_l);
+                let nav_x = (draw_rect.center().x - nav_total / 2.0).clamp(nav_l, nav_r);
                 let nav: [(Icon, &str, u32); 3] = [
                     (Icon::Back, "返回", 4),
                     (Icon::Home, "主页", 3),
@@ -2061,7 +2644,7 @@ fn node_label(node: &Node) -> String {
     let class = node
         .attrs
         .get("class")
-        .map(|s| s.rsplit('.').last().unwrap_or(s).to_string())
+        .map(|s| s.rsplit('.').next_back().unwrap_or(s).to_string())
         .unwrap_or_else(|| "?".to_string());
     let rid = node
         .attrs
@@ -2098,7 +2681,7 @@ fn render_tree(
         return;
     }
     // Auto-expand the ancestor chain of the node we are jumping to.
-    let is_ancestor = jump.map_or(false, |j| node.find(j).is_some());
+    let is_ancestor = jump.is_some_and(|j| node.find(j).is_some());
     let is_target = jump == Some(node.id);
     let is_selected = *selected == Some(node.id);
     let label = node_label(node);

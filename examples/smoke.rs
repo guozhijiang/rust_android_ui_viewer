@@ -20,6 +20,7 @@ fn main() {
     let serial_hint = String::new(); // auto-detect the single connected device
     let scrcpy_dir = "D:\\scrcpy-win64-v4.0".to_string();
     let max_video_size: u32 = 1024;
+    let bitrate: u32 = 2_000_000;
 
     let (tx, rx) = mpsc::channel::<LiveEvent>();
     let stop = Arc::new(AtomicBool::new(false));
@@ -29,6 +30,7 @@ fn main() {
         serial_hint,
         scrcpy_dir,
         max_video_size,
+        bitrate,
         stop.clone(),
         tx,
     );

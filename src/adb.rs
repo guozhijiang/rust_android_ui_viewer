@@ -12,6 +12,298 @@ fn hide_console(cmd: &mut Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
+/// Common settings/tables the left panel offers a one-tap deep link into.
+pub const SYSTEM_SETTINGS: &[(&str, &str)] = &[
+    ("Wi-Fi", "android.settings.WIFI_SETTINGS"),
+    ("蓝牙", "android.settings.BLUETOOTH_SETTINGS"),
+    ("声音", "android.settings.SOUND_SETTINGS"),
+    ("显示", "android.settings.DISPLAY_SETTINGS"),
+    ("Wi-Fi 热点", "android.settings.WIRELESS_SETTINGS"),
+    ("应用", "android.settings.APPLICATION_SETTINGS"),
+    ("存储", "android.settings.INTERNAL_STORAGE_SETTINGS"),
+    ("开发者选项", "android.settings.APPLICATION_DEVELOPMENT_SETTINGS"),
+];
+
+/// A single installed app entry, as shown in the left panel list.
+#[derive(Debug, Clone, Default)]
+pub struct AppInfo {
+    pub package: String,
+    /// True if it is a third-party (user-installed) package.
+    pub third_party: bool,
+    /// Best-effort: whether a process for this package is currently running.
+    pub running: bool,
+}
+
+/// A summary of connected-device properties (brand/model/OS/resolution…).
+#[derive(Debug, Clone, Default)]
+pub struct DeviceInfo {
+    pub brand: String,
+    pub model: String,
+    pub android: String,
+    pub sdk: String,
+    pub resolution: String,
+    pub density: String,
+    pub battery: String,
+    pub serial: String,
+}
+
+/// A shell-backed adb command (honours `-s <serial>` when non-empty) with no
+/// separate console window on Windows.
+fn shell(adb: &str, serial: &str, args: &[&str]) -> Command {
+    let mut c = Command::new(adb);
+    hide_console(&mut c);
+    if !serial.is_empty() {
+        c.arg("-s").arg(serial);
+    }
+    c.args(args);
+    c
+}
+
+/// Run a shell command and return its stdout as UTF-8 (lossy, best effort).
+fn sh_stdout(adb: &str, serial: &str, args: &[&str]) -> String {
+    shell(adb, serial, args)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default()
+}
+
+/// `adb shell getprop`, parsed into a `name -> value` map (`[k]: [v]` lines).
+fn read_props(adb: &str, serial: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let text = sh_stdout(adb, serial, &["shell", "getprop"]);
+    for line in text.lines() {
+        let line = line.trim();
+        if let (Some(k), Some(v)) = (line.find('['), line.rfind('[')) {
+            if k == 0 && v > 0 {
+                let key = &line[1..v];
+                let rest = &line[v + 1..];
+                let val = rest.trim_end_matches(']').trim_start_matches(']').trim();
+                let val = val.strip_suffix(']').unwrap_or(val);
+                map.insert(key.to_string(), val.to_string());
+            }
+        }
+    }
+    map
+}
+
+/// Gather device properties shown in the left panel's device-info card.
+pub fn device_info(adb: &str, serial: &str) -> DeviceInfo {
+    let p = read_props(adb, serial);
+    let dpi = p.get("ro.sf.lcd_density").cloned().unwrap_or_default();
+    DeviceInfo {
+        brand: p.get("ro.product.brand").cloned().unwrap_or_default(),
+        model: p.get("ro.product.model").cloned().unwrap_or_default(),
+        android: p.get("ro.build.version.release").cloned().unwrap_or_default(),
+        sdk: p.get("ro.build.version.sdk").cloned().unwrap_or_default(),
+        resolution: sh_stdout(adb, serial, &["shell", "wm", "size"])
+            .lines()
+            .find_map(|l| l.split_once("Physical size:").map(|(_, s)| s.trim().to_string()))
+            .unwrap_or_default(),
+        density: if dpi.is_empty() {
+            String::new()
+        } else {
+            format!("{dpi} dpi")
+        },
+        battery: battery_pct(adb, serial),
+        serial: serial.to_string(),
+    }
+}
+
+/// Best-effort battery percentage, e.g. `"78%"`; empty if unknown.
+fn battery_pct(adb: &str, serial: &str) -> String {
+    let out = sh_stdout(adb, serial, &["shell", "dumpsys", "battery"]);
+    for line in out.lines() {
+        if let Some(lvl) = line.trim_start().strip_prefix("level:") {
+            if let Ok(n) = lvl.trim().parse::<i32>() {
+                return format!("{n}%");
+            }
+        }
+        if let Some(chg) = line.trim_start().strip_prefix("status:") {
+            // 2 = charging, 3 = discharging, 5 = full
+            return match chg.trim() {
+                "2" => "充电中".to_string(),
+                "5" => "已充满".to_string(),
+                other => other.to_string(),
+            };
+        }
+    }
+    String::new()
+}
+
+/// List installed packages. `filter` restricts the section: "all", "system",
+/// "third", or "running". Returns one entry per package.
+pub fn list_apps(adb: &str, serial: &str, filter: &str) -> Vec<AppInfo> {
+    // Third-party set (user-installed).
+    let third: std::collections::HashSet<String> = sh_stdout(
+        adb,
+        serial,
+        &["shell", "pm", "list", "packages", "-3"],
+    )
+    .lines()
+    .filter_map(|l| l.strip_prefix("package:"))
+    .map(|s| s.trim().to_string())
+    .collect();
+
+    // Running set: package becomes the process name; match by exact name, else
+    // by the longest package that is a prefix of a process name (best effort).
+    let running: std::collections::HashSet<String> = sh_stdout(
+        adb,
+        serial,
+        &["shell", "ps", "-A", "-o", "NAME"],
+    )
+    .lines()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty() && s != "NAME")
+    .collect();
+
+    // The full package list.
+    let mut apps: Vec<AppInfo> = sh_stdout(adb, serial, &["shell", "pm", "list", "packages"])
+        .lines()
+        .filter_map(|l| l.strip_prefix("package:"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|pkg| {
+            let tp = third.contains(&pkg);
+            let running = running.iter().any(|pn| {
+                pn == &pkg || pkg.starts_with(pn) || pn.starts_with(&pkg)
+            });
+            AppInfo {
+                package: pkg,
+                third_party: tp,
+                running,
+            }
+        })
+        .collect();
+
+    apps.sort_by(|a, b| a.package.cmp(&b.package));
+    match filter {
+        "system" => apps.retain(|a| !a.third_party),
+        "third" => apps.retain(|a| a.third_party),
+        "running" => apps.retain(|a| a.running),
+        _ => {}
+    }
+    apps
+}
+
+/// Read a package's version metadata via `dumpsys package`.
+pub fn app_properties(adb: &str, serial: &str, pkg: &str) -> String {
+    let out = sh_stdout(adb, serial, &["shell", "dumpsys", "package", pkg]);
+    let mut props = Vec::new();
+    for line in out.lines() {
+        let l = line.trim();
+        for key in ["versionName", "versionCode", "firstInstallTime", "lastUpdateTime"] {
+            if let Some(v) = l.strip_prefix(&format!("{key}=")) {
+                props.push(format!("{key}: {v}"));
+            }
+        }
+    }
+    if props.is_empty() {
+        format!("未查询到 {pkg} 的信息（包未安装？）")
+    } else {
+        props.join("\n")
+    }
+}
+
+/// Install an APK (`adb install -r`). Returns the first non-empty adb line.
+pub fn install_apk(adb: &str, serial: &str, path: &str) -> Result<String> {
+    let mut c = shell(adb, serial, &["install", "-r", path]);
+    let out = c
+        .output()
+        .map_err(|e| anyhow!("无法运行 adb ({}): {}", adb, e))?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let sep = text
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| if out.status.success() { "Success".to_string() } else { "安装失败".to_string() });
+    Ok(sep)
+}
+
+/// Launch an app's launcher entry. Resolves the activity through the package
+/// manager, falling back to `monkey` when no LAUNCHER entry exists.
+pub fn start_app(adb: &str, serial: &str, pkg: &str) {
+    let resolve = sh_stdout(
+        adb,
+        serial,
+        &[
+            "shell",
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            pkg,
+        ],
+    );
+    if let Some(line) = resolve.lines().find(|l| l.contains('/')) {
+        let target = line.trim();
+        if !target.is_empty() && target != "null" && target != "No activity found" {
+            let _ = shell(adb, serial, &["shell", "am", "start", "-n", target]).spawn();
+            return;
+        }
+    }
+    let _ = shell(
+        adb,
+        serial,
+        &[
+            "shell",
+            "monkey",
+            "-p",
+            pkg,
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1",
+        ],
+    )
+    .spawn();
+}
+
+/// Force-stop a package (`am force-stop`).
+pub fn force_stop(adb: &str, serial: &str, pkg: &str) {
+    let _ = shell(adb, serial, &["shell", "am", "force-stop", pkg]).spawn();
+}
+
+/// Clear an app's data (`pm clear`).
+pub fn clear_app(adb: &str, serial: &str, pkg: &str) -> String {
+    let out = shell(adb, serial, &["shell", "pm", "clear", pkg])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if out == "Success" {
+        "已清除数据".to_string()
+    } else if out.ends_with("Failed") {
+        format!("清除失败（{}，可能被系统保护）", pkg)
+    } else {
+        out
+    }
+}
+
+/// Open the system settings page for an app (`APPLICATION_DETAILS_SETTINGS`).
+pub fn open_app_settings(adb: &str, serial: &str, pkg: &str) {
+    let uri = format!("package:{pkg}");
+    let _ = shell(
+        adb,
+        serial,
+        &[
+            "shell",
+            "am",
+            "start",
+            "-a",
+            "android.settings.APPLICATION_DETAILS_SETTINGS",
+            "-d",
+            &uri,
+        ],
+    )
+    .spawn();
+}
+
+/// Deep-link to a system settings screen by action string.
+pub fn open_settings_action(adb: &str, serial: &str, action: &str) {
+    let _ = shell(adb, serial, &["shell", "am", "start", "-a", action, "android.settings.SETTINGS"])
+        .spawn();
+}
+
 /// Result of a full capture: raw PNG bytes + the uiautomator XML dump.
 pub struct CaptureResult {
     pub screenshot: Vec<u8>,
@@ -181,7 +473,7 @@ pub fn current_app(adb: &str, serial: &str) -> Option<(String, String)> {
         if let Some(pos) = line.find("mCurrentFocus=") {
             let rest = &line[pos + "mCurrentFocus=".len()..];
             // Grab the first token containing a '/', e.g. com.pkg/.Activity
-            for tok in rest.split(|c: char| c == ' ' || c == '{' || c == '}') {
+            for tok in rest.split([' ', '{', '}']) {
                 if let Some(slash) = tok.find('/') {
                     let pkg = tok[..slash].to_string();
                     let act = tok[slash + 1..].trim_end_matches('}').to_string();
