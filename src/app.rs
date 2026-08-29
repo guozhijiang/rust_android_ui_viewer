@@ -1997,6 +1997,7 @@ impl eframe::App for UiViewerApp {
             .frame(card_frame(ctx.style().visuals.dark_mode))
             .default_width(300.0)
             .min_width(220.0)
+            .max_width(460.0)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.add_space(4.0);
@@ -2041,6 +2042,7 @@ impl eframe::App for UiViewerApp {
             .frame(card_frame(ctx.style().visuals.dark_mode))
             .default_width(560.0)
             .min_width(340.0)
+            .max_width(720.0)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.add_space(4.0);
@@ -2883,6 +2885,9 @@ fn render_tree(
 // ----- Properties rendering -----
 
 fn render_props(ui: &mut egui::Ui, node: &Node) {
+    // Wrap long values instead of letting a single wide line expand the panel
+    // and cover the screenshot / hierarchy tree.
+    ui.style_mut().wrap = Some(true);
     let class = node.attrs.get("class").cloned().unwrap_or_default();
     ui.label(egui::RichText::new(class).strong());
     ui.separator();
