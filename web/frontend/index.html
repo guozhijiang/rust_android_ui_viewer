@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Android UI Viewer (Web)</title>
+  <link rel="stylesheet" href="/static/style.css?v=2" />
+</head>
+<body>
+  <header id="topbar">
+    <span class="title">📱 Android UI Viewer</span>
+    <nav id="tabs">
+      <button class="tab active" data-tab="inspect">UI查看</button>
+      <button class="tab" data-tab="live">实时</button>
+    </nav>
+    <select id="device" title="选择设备">
+      <option value="">（默认设备）</option>
+    </select>
+    <button id="refreshDevices" title="刷新设备列表">⟳</button>
+    <span class="spacer"></span>
+    <div id="u2Widget" class="u2-widget">
+      <button id="u2Toggle" class="u2-toggle" title="uiautomator2 加速抓取（点击展开配置）">
+        <span id="u2Dot" class="u2-dot"></span> u2
+      </button>
+      <div id="u2Panel" class="u2-panel" hidden>
+        <div class="u2-panel-title">加速抓取 (u2 / uiautomator2)</div>
+        <div id="u2Status" class="u2-status">状态：未启动</div>
+        <label class="u2-label">u2 jar 路径（留空用默认 %USERPROFILE%\.u2\u2_core.jar）</label>
+        <input id="u2Jar" class="full-input" placeholder="C:\Users\...\u2_core.jar" />
+        <div class="quick-keys">
+          <button id="u2Start">推送并启动</button>
+          <button id="u2Stop">停止</button>
+        </div>
+        <div id="u2Msg" class="install-result"></div>
+      </div>
+    </div>
+    <span id="status" class="status">就绪</span>
+  </header>
+
+  <!-- 检视模式工具条 -->
+  <div id="inspectBar" class="toolbar">
+    <button id="capture" title="抓取当前屏幕 + UI 层级 (adb)">Capture</button>
+    <button id="importBtn" title="导入本地截图与 XML">Import</button>
+    <button id="saveBtn" title="保存截图与 XML 到本地">保存</button>
+    <input type="file" id="importImg" accept="image/png,image/jpeg" hidden />
+    <input type="file" id="importXml" accept=".xml,text/xml" hidden />
+    <span class="toolbar-sep"></span>
+    <input type="search" id="search" placeholder="搜索属性关键字…" />
+    <span class="toolbar-sep"></span>
+    <span class="zoom-controls">
+      <button id="zoomOut" title="缩小">−</button>
+      <span id="zoomLabel">1.00x</span>
+      <button id="zoomIn" title="放大">+</button>
+      <button id="zoomFit" title="适配">适</button>
+    </span>
+  </div>
+
+  <!-- 实时模式工具条 -->
+  <div id="liveBar" class="toolbar" hidden>
+    <button id="liveConnect" class="primary" title="启动 scrcpy 会话">连接</button>
+    <select id="livePreset" title="画质预设">
+      <option value="0">清晰 (原始分辨率)</option>
+      <option value="1" selected>流畅 (1024, ~4Mbps)</option>
+      <option value="2">极速 (720, ~2Mbps)</option>
+    </select>
+    <button id="liveDump" title="抓取当前 UI 层级并叠加到实时画面">抓取 UI 树</button>
+    <label class="chk" title="在实时画面上叠加 UI 控件边界">
+      <input type="checkbox" id="liveOverlayChk" /> 叠加
+    </label>
+    <label class="chk" title="启用后键盘按键直接发送到设备">
+      <input type="checkbox" id="liveKbdChk" /> 键盘
+    </label>
+    <input type="text" id="liveText" placeholder="输入文本，回车发送" title="注入文本到设备" />
+    <span class="toolbar-sep"></span>
+    <button id="recToggle" title="开始/停止录制">● 录制</button>
+    <button id="recSave" title="保存录制为 JSON" disabled>保存</button>
+    <button id="recLoad" title="加载 JSON 回放">回放…</button>
+    <input type="file" id="recFile" accept=".json" hidden />
+    <label class="chk" title="回放速度倍率">
+      速度 <input type="number" id="recSpeed" value="1" min="0.25" max="8" step="0.25" style="width:50px" />
+    </label>
+    <label class="chk" title="循环次数（0=单次）">
+      循环 <input type="number" id="recLoops" value="0" min="0" max="100" step="1" style="width:40px" />
+    </label>
+  </div>
+
+  <main id="layout">
+    <!-- Left: properties / device / apps / settings panel -->
+    <section id="props" class="pane">
+      <div class="pane-title">
+        <span id="propsTitle">属性</span>
+        <span id="propsId" class="count"></span>
+      </div>
+      <nav id="leftTabs" class="left-tabs" hidden>
+        <button class="ltab active" data-ltab="props">元素</button>
+        <button class="ltab" data-ltab="device">设备</button>
+        <button class="ltab" data-ltab="apps">应用</button>
+        <button class="ltab" data-ltab="settings">设置</button>
+      </nav>
+      <div id="propsBody" class="props-body">未选择节点</div>
+
+      <!-- Device tab -->
+      <div id="tabDevice" class="left-tab-pane" hidden>
+        <div class="left-section">设备基本信息</div>
+        <div id="deviceBody" class="props-body">点击「刷新」加载</div>
+      </div>
+
+      <!-- Apps tab -->
+      <div id="tabApps" class="left-tab-pane" hidden>
+        <div class="apps-filter">
+          <button class="af" data-filter="third">三方</button>
+          <button class="af" data-filter="all">全部</button>
+          <button class="af" data-filter="system">系统</button>
+          <button class="af" data-filter="running">运行中</button>
+        </div>
+        <input type="search" id="appSearch" placeholder="搜索包名…" class="app-search" />
+        <div id="appList" class="app-list"></div>
+        <div id="appDetail" class="app-detail" hidden></div>
+        <div class="left-section">安装应用</div>
+        <button id="installBtn" class="full-btn">选择 APK 并安装</button>
+        <input type="file" id="installFile" accept=".apk" hidden />
+        <div id="installResult" class="install-result"></div>
+      </div>
+
+      <!-- Settings tab -->
+      <div id="tabSettings" class="left-tab-pane" hidden>
+        <div class="left-section">系统设置直达</div>
+        <div id="settingsGrid" class="settings-grid"></div>
+        <div class="left-section">设备快捷操作</div>
+        <div class="quick-keys">
+          <button data-key="26" title="锁屏/息屏">🔒 锁屏</button>
+          <button data-key="3" title="主页">⌂ 主页</button>
+          <button data-key="4" title="返回">◀ 返回</button>
+          <button data-key="187" title="最近任务">▤ 最近</button>
+          <button data-key="82" title="菜单">☰ 菜单</button>
+        </div>
+        <div class="left-section">音量</div>
+        <div class="quick-keys">
+          <button data-key="25">音量 −</button>
+          <button data-key="24">音量 ＋</button>
+          <button data-key="164">静音</button>
+        </div>
+        <div class="left-section">亮度</div>
+        <div class="quick-keys">
+          <button data-brightness="64">25%</button>
+          <button data-brightness="128">50%</button>
+          <button data-brightness="191">75%</button>
+          <button data-brightness="255">100%</button>
+          <button data-auto="1">自动</button>
+          <button data-auto="0">手动</button>
+        </div>
+        <div id="settingsResult" class="install-result"></div>
+      </div>
+    </section>
+
+    <!-- Center: viewer (screenshot / live canvas + overlay) -->
+    <section id="viewer" class="pane">
+      <div class="pane-title">
+        <span id="viewerTitle">截图</span>
+        <span id="coord" class="coord">x: -  y: -</span>
+      </div>
+      <div id="viewport">
+        <div id="stage">
+          <img id="screen" alt="screen" />
+          <canvas id="liveCanvas" hidden></canvas>
+          <svg id="overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+        <!-- Device-style controls, mirroring the Rust build: side keys on the
+             right edge and a navigation bar below the picture. They sit in the
+             letterbox around the frame, never on top of it. -->
+        <div id="liveSide" class="live-side" hidden>
+          <button id="liveEnd" title="结束会话">✕</button>
+          <button data-key="26" title="电源键">⏻</button>
+          <button data-key="24" title="音量+">+</button>
+          <button data-key="25" title="音量−">−</button>
+        </div>
+        <div id="liveNav" class="live-nav" hidden>
+          <button data-key="4" title="返回">◀ 返回</button>
+          <button data-key="3" title="主页">● 主页</button>
+          <button data-key="187" title="最近任务">▣ 最近</button>
+        </div>
+        <div id="emptyHint" class="empty-hint">点击「Capture」抓取设备屏幕，或切换到「实时」标签连接设备。</div>
+      </div>
+    </section>
+
+    <!-- Right: hierarchy tree / recording -->
+    <section id="tree" class="pane">
+      <div class="pane-title">
+        <span id="treeTitle">层级结构</span>
+        <span id="nodeCount" class="count"></span>
+        <span id="liveDebug" class="count" style="margin-left:8px;color:var(--accent-2);display:none"></span>
+      </div>
+      <div id="treeBody" class="tree-body"></div>
+      <div id="recPanel" class="rec-panel" hidden>
+        <div class="rec-header">录制 / 回放</div>
+        <div id="recSteps" class="rec-steps"></div>
+        <div id="recStatus" class="rec-status">未录制</div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js?v=2"></script>
+</body>
+</html>

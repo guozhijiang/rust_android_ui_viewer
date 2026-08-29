@@ -1,3 +1,9 @@
 /target
 **/*.rs.bk
 coverage/
+
+# Python (web backend)
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/

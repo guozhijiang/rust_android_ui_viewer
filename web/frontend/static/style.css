@@ -1,0 +1,459 @@
+:root {
+  --bg: #1e1e22;
+  --panel: #26262b;
+  --panel-2: #2e2e35;
+  --border: #3a3a42;
+  --text: #e6e6e6;
+  --muted: #9a9aa3;
+  --accent: #4ea1ff;
+  --accent-2: #ffd24e;
+  --green: #3ecf6e;
+  --red: #ff6b6b;
+  --sel: #3a5a8c;
+}
+
+* { box-sizing: border-box; }
+
+/* Author rules like `.toolbar { display: flex }` outrank the UA stylesheet's
+   `[hidden] { display: none }`, which silently broke every `el.hidden = true`
+   toggle (mode bars stayed on screen and pushed the layout off-view). */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+/* Column flex: the top bar and the mode toolbars take their natural height and
+   #layout fills whatever is left. A hardcoded `calc(100% - 86px)` assumed
+   exactly one toolbar and overflowed the window whenever two were laid out. */
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+#topbar .title { font-weight: 600; margin-right: 6px; }
+#topbar .spacer { flex: 1; }
+#topbar select, #topbar input[type="search"], #topbar button,
+.toolbar select, .toolbar input[type="text"], .toolbar button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+}
+#topbar button, .toolbar button { cursor: pointer; }
+#topbar button:hover, .toolbar button:hover { border-color: var(--accent); }
+#topbar input[type="search"] { width: 200px; }
+.status { font-size: 12px; color: var(--muted); min-width: 60px; }
+
+/* Tabs */
+#tabs { display: flex; gap: 4px; margin-left: 10px; }
+#tabs .tab {
+  background: transparent; color: var(--muted); border: 1px solid transparent;
+  border-radius: 6px; padding: 5px 14px; font-size: 13px; cursor: pointer;
+}
+#tabs .tab:hover { color: var(--text); }
+#tabs .tab.active {
+  color: var(--text); background: var(--panel-2); border-color: var(--border);
+  font-weight: 600;
+}
+
+/* Toolbars */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 42px;
+  padding: 0 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.toolbar-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
+.toolbar .chk {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 13px; color: var(--muted); cursor: pointer; user-select: none;
+}
+.toolbar .chk input { accent-color: var(--accent); }
+.toolbar button.primary { border-color: var(--green); color: var(--green); }
+.toolbar button.primary.live-on { border-color: var(--red); color: var(--red); }
+.toolbar input[type="text"] { width: 180px; }
+
+#layout {
+  display: grid;
+  grid-template-columns: 300px 1fr 360px;
+  flex: 1;
+  min-height: 0;
+}
+
+.pane { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); }
+#tree { border-right: none; }
+.pane-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.pane-title .coord { margin-left: auto; font-weight: 400; font-family: monospace; color: var(--accent-2); }
+.pane-title .count { margin-left: auto; font-weight: 400; }
+.zoom-controls { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.zoom-controls button {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 5px; width: 26px; height: 24px; cursor: pointer; font-size: 14px;
+}
+.zoom-controls #zoomLabel { min-width: 44px; text-align: center; font-size: 12px; color: var(--muted); font-family: monospace; }
+
+/* Properties */
+.props-body { padding: 10px 12px; overflow: auto; flex: 1; }
+.props-body .empty { color: var(--muted); font-size: 13px; }
+.prop-row { padding: 4px 0; border-bottom: 1px dashed var(--border); }
+.prop-key { color: var(--accent); font-size: 12px; }
+.prop-val { font-size: 13px; word-break: break-all; white-space: pre-wrap; }
+.prop-val.hl { color: var(--accent-2); }
+
+/* Viewer */
+#viewer { background: #0c0c0e; }
+#viewport {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  cursor: grab;
+}
+#viewport.grabbing { cursor: grabbing; }
+#stage {
+  position: absolute;
+  top: 0; left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+#screen { display: block; }
+#liveCanvas { display: block; }
+#overlay {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+}
+.empty-hint {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 14px; text-align: center; padding: 20px;
+}
+
+/* Live device-style controls (outside the picture, real-phone layout) */
+.live-side {
+  position: absolute; right: 6px; top: 50%;
+  transform: translateY(-50%);
+  display: flex; flex-direction: column; gap: 6px;
+  z-index: 5;
+}
+.live-nav {
+  position: absolute; left: 50%; bottom: 6px;
+  transform: translateX(-50%);
+  display: flex; gap: 8px;
+  z-index: 5;
+}
+.live-side button, .live-nav button {
+  background: rgba(38,38,43,0.92);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  user-select: none;
+}
+.live-side button { width: 38px; height: 34px; }
+.live-nav button { min-width: 74px; height: 34px; font-size: 13px; padding: 0 12px; }
+.live-side button:hover, .live-nav button:hover {
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+#liveEnd { color: var(--red); }
+#liveEnd:hover { border-color: var(--red); background: rgba(255, 107, 107, 0.15); }
+
+/* Tree */
+.tree-body { overflow: auto; flex: 1; padding: 6px 0; font-size: 13px; font-family: monospace; }
+.tree-body ul { list-style: none; margin: 0; padding-left: 14px; }
+.tree-body > ul { padding-left: 4px; }
+.tree-node { white-space: nowrap; }
+.tree-row {
+  display: flex; align-items: center; gap: 4px;
+  padding: 1px 6px; border-radius: 4px; cursor: pointer;
+}
+.tree-row:hover { background: var(--panel-2); }
+.tree-row.selected { background: var(--sel); }
+.tree-row.match { background: rgba(255,210,78,0.18); }
+.tree-toggle {
+  width: 14px; text-align: center; color: var(--muted); cursor: pointer; user-select: none;
+}
+.tree-label { overflow: hidden; text-overflow: ellipsis; }
+.tree-label .cls { color: var(--accent); }
+.tree-label .txt { color: var(--accent-2); }
+.tree-label .idx { color: var(--muted); }
+
+/* Left tabs (element / device / apps / settings) */
+.left-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 4px 6px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.left-tabs .ltab {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 5px 5px 0 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.left-tabs .ltab:hover { color: var(--text); }
+.left-tabs .ltab.active {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+.left-tab-pane { flex: 1; overflow: auto; display: flex; flex-direction: column; min-height: 0; }
+.left-section {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+/* Apps tab */
+.apps-filter {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.apps-filter .af {
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.apps-filter .af.active { color: var(--text); border-color: var(--accent); }
+.app-search {
+  margin: 6px 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.app-list { flex: 1; overflow: auto; padding: 4px 8px; font-family: monospace; font-size: 12px; }
+.app-list .app-row {
+  padding: 3px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.app-list .app-row:hover { background: var(--panel-2); }
+.app-list .app-row.selected { background: var(--sel); }
+.app-list .app-row .running { color: var(--green); margin-left: 4px; }
+.app-detail {
+  border-top: 1px solid var(--border);
+  padding: 8px;
+  font-family: monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow: auto;
+  flex: 0 0 auto;
+}
+.app-detail .pkg-name { font-weight: 600; color: var(--accent); margin-bottom: 4px; }
+.app-detail .app-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0;
+}
+.app-detail .app-actions button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.app-detail .app-actions button:hover { border-color: var(--accent); }
+.full-btn {
+  width: calc(100% - 16px);
+  margin: 4px 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.install-result, .install-result:not(:empty) {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Settings tab */
+.settings-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+}
+.settings-grid button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.settings-grid button:hover { border-color: var(--accent); }
+.quick-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+}
+.quick-keys button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.quick-keys button:hover { border-color: var(--accent); }
+
+/* u2 acceleration panel */
+.u2-box {
+  padding: 8px;
+  margin: 4px 0 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.u2-status {
+  font-size: 12px;
+  margin-bottom: 6px;
+  color: var(--muted);
+}
+.u2-status.ok { color: var(--green); }
+.u2-status.warn { color: var(--accent-2); }
+.u2-label {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin: 6px 0 4px;
+}
+.full-input {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+/* Recording panel */
+.rec-panel {
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  flex: 0 0 auto;
+  max-height: 240px;
+  display: flex;
+  flex-direction: column;
+}
+.rec-header {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.rec-steps {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 12px;
+  font-family: monospace;
+  font-size: 12px;
+}
+.rec-steps .step { padding: 1px 0; white-space: nowrap; }
+.rec-steps .step.active { color: var(--green); }
+.rec-steps .step.failed { color: var(--red); }
+.rec-status { padding: 4px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
+.rec-status.recording { color: var(--red); font-weight: 600; }
+
+/* Zoom controls (inspect toolbar) */
+.zoom-controls { display: flex; align-items: center; gap: 4px; }
+.zoom-controls button {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 5px; width: 26px; height: 24px; cursor: pointer; font-size: 14px;
+}
+.zoom-controls #zoomLabel { min-width: 44px; text-align: center; font-size: 12px; color: var(--muted); font-family: monospace; }
+
+/* u2 acceleration widget in the top bar (moved out of the settings tab so it is
+   reachable from both UI查看 and 实时 without opening a side panel). */
+.u2-widget { position: relative; flex: 0 0 auto; }
+.u2-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 10px; font-size: 13px; cursor: pointer;
+}
+.u2-toggle:hover { border-color: var(--accent); }
+.u2-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #777; display: inline-block; transition: background 0.2s;
+}
+.u2-dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.u2-panel {
+  position: absolute; top: 42px; right: 0; width: 300px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px; z-index: 50;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+}
+.u2-panel-title { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.u2-panel .u2-label { display: block; }
+.u2-panel .quick-keys { padding: 8px 0 4px; }
