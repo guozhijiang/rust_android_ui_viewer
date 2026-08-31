@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Android UI Viewer (Web)</title>
-  <link rel="stylesheet" href="/static/style.css?v=2" />
+  <link rel="stylesheet" href="/static/style.css?v=3" />
 </head>
 <body>
   <header id="topbar">
@@ -90,9 +90,11 @@
   <main id="layout">
     <!-- Left: properties / device / apps / settings panel -->
     <section id="props" class="pane">
+      <button class="collapsed-handle" data-collapse="left" title="展开左侧面板">› 属性</button>
       <div class="pane-title">
         <span id="propsTitle">属性</span>
         <span id="propsId" class="count"></span>
+        <button class="pane-collapse" data-collapse="left" title="折叠左侧面板">‹</button>
       </div>
       <nav id="leftTabs" class="left-tabs" hidden>
         <button class="ltab active" data-ltab="props">元素</button>
@@ -188,10 +190,12 @@
 
     <!-- Right: hierarchy tree / recording -->
     <section id="tree" class="pane">
+      <button class="collapsed-handle" data-collapse="right" title="展开右侧面板">‹ 层级</button>
       <div class="pane-title">
         <span id="treeTitle">层级结构</span>
         <span id="nodeCount" class="count"></span>
         <span id="liveDebug" class="count" style="margin-left:8px;color:var(--accent-2);display:none"></span>
+        <button class="pane-collapse" data-collapse="right" title="折叠右侧面板">›</button>
       </div>
       <div id="treeBody" class="tree-body"></div>
       <div id="recPanel" class="rec-panel" hidden>
@@ -202,6 +206,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=2"></script>
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>

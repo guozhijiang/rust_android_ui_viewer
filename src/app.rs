@@ -7,10 +7,13 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use eframe::egui::{
-    Align, Color32, ColorImage, FontData, FontDefinitions, FontFamily, Pos2, Rect, Sense, Stroke,
-    TextureHandle, TextureOptions, Vec2,
+    Align, Color32, ColorImage, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
 };
 use egui::PointerButton;
+
+use crate::theme::{
+    c_accent, c_danger, c_success, c_text, c_text_dim, c_warn, card_frame, chip, segmented,
+};
 
 use crate::adb::{
     app_properties, capture_serial, clear_app, device_info, dump_ui, dump_ui_serial, force_stop,
@@ -317,6 +320,10 @@ pub struct UiViewerApp {
     system_dark: bool,
     /// Whether `system_dark` has been captured yet.
     system_theme_captured: bool,
+    /// UI zoom multiplier applied on top of the OS DPI scale. Set on startup
+    /// (larger on unscaled hi-dpi screens where glyphs would be tiny) and
+    /// adjustable from the ⚙ 配置 window.
+    ui_scale: f32,
     /// Whether the one-time look (theme + density) has been applied. Applying
     /// it every frame allocates a new Style and churns egui's caching, which
     /// measurably stutters the live-stream operate mode — so it runs once.
@@ -356,34 +363,7 @@ fn draw_badge(p: &egui::Painter, pos: Pos2, text: &str, color: Color32) {
     p.galley(rect.min + egui::vec2(8.0, 5.0), galley, Color32::WHITE);
 }
 
-/// Theme-aware palette driving the "card panels over a canvas" look.
-/// A single source of truth so light/dark switch consistently everywhere.
-fn c_card(dark: bool) -> Color32 {
-    if dark { Color32::from_rgb(27, 27, 32) } else { Color32::from_rgb(255, 255, 255) }
-}
-fn c_canvas(dark: bool) -> Color32 {
-    if dark { Color32::from_rgb(15, 15, 20) } else { Color32::from_rgb(236, 239, 245) }
-}
-fn c_border(dark: bool) -> Color32 {
-    if dark { Color32::from_rgb(50, 50, 58) } else { Color32::from_rgb(216, 221, 231) }
-}
-fn c_accent(dark: bool) -> Color32 {
-    if dark { Color32::from_rgb(130, 150, 255) } else { Color32::from_rgb(86, 106, 248) }
-}
-fn c_accent_soft(dark: bool) -> Color32 {
-    if dark { Color32::from_rgba_unmultiplied(130, 150, 255, 26) } else { Color32::from_rgba_unmultiplied(86, 106, 248, 28) }
-}
-/// Rounded, bordered "card" frame used for the top bar and side panels.
-fn card_frame(dark: bool) -> egui::Frame {
-    egui::Frame::none()
-        .fill(c_card(dark))
-        .rounding(egui::Rounding::same(8.0))
-        .stroke(Stroke::new(1.0, c_border(dark)))
-        .inner_margin(egui::Margin::same(6.0))
-        .outer_margin(egui::Margin::same(2.0))
-}
-
-/// Draw a 28px-ish icon centered in `rect`.
+/// Icons drawn with the painter so they render identically everywhere
 fn draw_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let c = rect.center();
     let s = rect.width().min(rect.height());
@@ -608,6 +588,7 @@ impl UiViewerApp {
             u2_auto_attempted: false,
             system_dark: false,
             system_theme_captured: false,
+            ui_scale: 1.0,
             look_applied: false,
         };
         // Populate the device list up front so the config window (open by
@@ -616,36 +597,38 @@ impl UiViewerApp {
         this
     }
 
-    /// Best-effort load of a system CJK font so Chinese text in properties renders.
-    pub fn setup_fonts(ctx: &egui::Context) {
-        let mut fonts = FontDefinitions::default();
-        for path in [
-            "C:\\Windows\\Fonts\\msyh.ttc",
-            "C:\\Windows\\Fonts\\simsun.ttc",
-            "C:\\Windows\\Fonts\\msjh.ttc",
-        ] {
-            if let Ok(bytes) = std::fs::read(path) {
-                fonts
-                    .font_data
-                    .insert("cjk".to_string(), FontData::from_owned(bytes));
-                if let Some(fam) = fonts.families.get_mut(&FontFamily::Proportional) {
-                    fam.insert(0, "cjk".to_string());
-                }
-                // The recording-steps list is drawn with the monospace family;
-                // without CJK there it would render Chinese as tofu boxes.
-                if let Some(fam) = fonts.families.get_mut(&FontFamily::Monospace) {
-                    fam.insert(0, "cjk".to_string());
-                }
-                break;
-            }
-        }
-        ctx.set_fonts(fonts);
+    /// Set the UI zoom multiplier (used at startup for the auto hi-dpi scale).
+    pub fn set_ui_scale(&mut self, scale: f32) {
+        self.ui_scale = scale.clamp(0.75, 3.0);
     }
 
-    /// Apply the chosen theme (light/dark/follow-system) and UI density on
-    /// every frame. "Follow system" re-uses the dark-mode value egui picked at
-    /// startup (egui 0.27 exposes no live OS-theme API, so we capture it once).
+    /// Load the UI font stack (Latin/CJK/mono) and pick a sensible starting
+    /// UI scale for high-DPI or high-resolution displays.
+    ///
+    /// On a 4K panel at 100% scaling the OS reports 1.0 device pixels per
+    /// point, which makes every glyph tiny and mushy; we bump the egui zoom
+    /// factor so text is rendered at a comfortable, crisp size. The user can
+    /// override it in the ⚙ 配置 window afterwards.
+    /// Returns the auto-picked UI scale so the caller can store it on the app.
+    pub fn setup_fonts(ctx: &egui::Context) -> f32 {
+        crate::theme::setup_fonts(ctx);
+        let native = ctx.native_pixels_per_point().unwrap_or(1.0);
+        // >=1.2 covers the usual 125%/150% Windows scaling, where the OS
+        // already gives us crisp glyphs and extra zoom just wastes space.
+        let auto = if native < 1.2 { 1.25 } else { 1.0 };
+        ctx.set_zoom_factor(auto);
+        auto
+    }
+
+    /// Apply the chosen theme (light/dark/follow-system), font scale and UI
+    /// density. Cheap to call every frame: heavy work is skipped after the
+    /// first apply and only re-runs when the user changes the scale.
     fn apply_look(&mut self, ctx: &egui::Context) {
+        // UI scale can be changed at any time from the config window; keep the
+        // egui zoom factor in sync (cheap no-op when unchanged).
+        if (ctx.zoom_factor() - self.ui_scale).abs() > 0.001 {
+            ctx.set_zoom_factor(self.ui_scale);
+        }
         // Apply once — re-running each frame just re-allocates the Style and
         // forces egui to re-reshape text every frame (stutters the live video).
         if self.look_applied {
@@ -655,50 +638,7 @@ impl UiViewerApp {
             self.system_theme_captured = true;
             self.system_dark = ctx.style().visuals.dark_mode;
         }
-        let dark = self.system_dark;
-        let mut visuals = if dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        };
-        let accent = c_accent(dark);
-        // Text color rendered ON the accent fill (selected/pressed states).
-        let on_accent = if dark { Color32::from_rgb(18, 18, 26) } else { Color32::WHITE };
-        // Distinct "canvas" base with cards floating on top + brand accent.
-        visuals.panel_fill = c_canvas(dark);
-        visuals.window_fill = c_card(dark);
-        visuals.window_stroke = Stroke::new(1.0, c_border(dark));
-        visuals.selection.bg_fill = accent;
-        visuals.selection.stroke = Stroke::new(1.0, on_accent);
-        visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
-        visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
-        visuals.widgets.active.rounding = egui::Rounding::same(6.0);
-        visuals.widgets.hovered.weak_bg_fill = c_accent_soft(dark);
-        // Selected/pressed widgets (e.g. the mode switch) get a solid brand-blue
-        // fill with a readable, contrasting text color.
-        visuals.widgets.active.weak_bg_fill = accent;
-        visuals.widgets.active.fg_stroke = Stroke::new(1.0, on_accent);
-        // Make text-edit fields clearly visible against the white card frame —
-        // egui's default field fill is white, which vanishes on the card, so
-        // give it a tinted fill plus a defined border (inactive=read-only,
-        // active=focused). This covers the operate-mode text input and the
-        // config window's ADB/scrcpy path fields.
-        let field_bg = if dark { Color32::from_rgb(42, 42, 50) } else { Color32::from_rgb(245, 246, 250) };
-        let field_bd = if dark { Color32::from_rgb(72, 72, 84) } else { Color32::from_rgb(178, 183, 194) };
-        let field_bd_h = if dark { Color32::from_rgb(92, 92, 106) } else { Color32::from_rgb(150, 155, 168) };
-        visuals.extreme_bg_color = field_bg;
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, field_bd);
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, field_bd_h);
-        visuals.widgets.open.bg_stroke = Stroke::new(1.0, field_bd);
-        // Focused field gets an accent border for a clear active state.
-        visuals.widgets.active.bg_stroke = Stroke::new(1.5, accent);
-        let mut style = (*ctx.style()).clone();
-        style.visuals = visuals;
-        // Fixed "normal" density (not user-configurable).
-        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-        style.spacing.button_padding = Vec2::new(6.0, 3.0);
-        style.spacing.interact_size.y = 22.0;
-        ctx.set_style(std::sync::Arc::new(style));
+        crate::theme::apply_style(ctx, self.system_dark);
         self.look_applied = true;
     }
 
@@ -1779,11 +1719,28 @@ impl eframe::App for UiViewerApp {
             }
         }
 
-        // ---- Top panel: actions + config toggle + status ----
+        // ---- Top panel: brand + actions + status ----
         egui::TopBottomPanel::top("top")
             .frame(card_frame(ctx.style().visuals.dark_mode))
             .show(ctx, |ui| {
+            let dark = ui.visuals().dark_mode;
             ui.horizontal_wrapped(|ui| {
+                // Brand mark: a small accent bar, so the title reads as a
+                // product header instead of just another label.
+                let (bar, _) = ui.allocate_exact_size(egui::vec2(3.0, 16.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(bar, egui::Rounding::same(1.5), c_accent(dark));
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new("Android UI Viewer")
+                        .size(15.0)
+                        .color(c_text(dark)),
+                );
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.5).color(c_text_dim(dark)))
+                    .on_hover_text("Android UI Viewer 版本号");
+                ui.add_space(10.0);
+                ui.separator();
                 // Grabbing is automatic when entering "查看 UI", so the top bar
                 // only needs Save (keep screenshot + XML) and Load (screenshot + XML).
                 if ui.button("保存截图和XML").clicked() {
@@ -1800,18 +1757,14 @@ impl eframe::App for UiViewerApp {
                     ui.spinner();
                     ui.label("抓取中…");
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).weak(),
-                    )
-                    .on_hover_text("Android UI Viewer 版本号");
-                });
             });
+            ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
                 if let Some((x, y)) = self.hover_pix {
                     ui.monospace(format!("坐标: ({x}, {y})"));
+                    ui.separator();
                 }
-                ui.separator();
+                let dark = ui.visuals().dark_mode;
                 let status_color = if self.status.contains("失败")
                     || self.status.contains("错误")
                     || self.status.contains("请")
@@ -1819,19 +1772,19 @@ impl eframe::App for UiViewerApp {
                     || self.status.contains("为空")
                     || self.status.contains("需要")
                 {
-                    Color32::from_rgb(240, 130, 130)
+                    c_danger(dark)
                 } else {
-                    Color32::from_rgb(220, 220, 220)
+                    c_text_dim(dark)
                 };
                 ui.colored_label(status_color, &self.status);
                 // Connection badge (operate mode only).
                 if self.op_mode {
-                    ui.separator();
+                    ui.add_space(8.0);
                     if self.live_started {
-                        ui.colored_label(Color32::from_rgb(90, 200, 120), "● 已连接")
+                        chip(ui, "已连接", c_success(dark))
                             .on_hover_text("操作会话已连接（实时控制或已回退 adb）");
                     } else {
-                        ui.colored_label(Color32::from_rgb(228, 150, 140), "○ 未连接")
+                        chip(ui, "未连接", c_danger(dark))
                             .on_hover_text("操作会话正在建立或已结束");
                     }
                 }
@@ -1839,11 +1792,8 @@ impl eframe::App for UiViewerApp {
                 if self.replaying {
                     if let Some(idx) = self.replay_current {
                         let n = self.steps.len().max(1);
-                        ui.separator();
-                        ui.colored_label(
-                            Color32::from_rgb(230, 160, 60),
-                            format!("回放 {}/{}", idx + 1, n),
-                        );
+                        ui.add_space(8.0);
+                        chip(ui, &format!("回放 {}/{}", idx + 1, n), c_warn(dark));
                         ui.add(
                             egui::ProgressBar::new(((idx + 1) as f32 / n as f32).clamp(0.0, 1.0))
                                 .desired_width(140.0),
@@ -1935,6 +1885,24 @@ impl eframe::App for UiViewerApp {
                         });
                     }
                     ui.separator();
+                    ui.strong("界面缩放");
+                    ui.horizontal_wrapped(|ui| {
+                        let mut scale = self.ui_scale;
+                        for s in [1.0f32, 1.25, 1.5, 1.75, 2.0] {
+                            if ui
+                                .selectable_label(
+                                    (scale - s).abs() < 0.001,
+                                    format!("{}%", (s * 100.0) as i32),
+                                )
+                                .clicked()
+                            {
+                                scale = s;
+                            }
+                        }
+                        self.ui_scale = scale;
+                    });
+                    ui.weak("高分屏上文字发虚时调大；下一帧生效，不影响设备画面。");
+                    ui.separator();
                     ui.strong("u2 快速抓树（可选）");
                     if let Some(s) = &self.u2_status {
                         ui.label(s);
@@ -1964,12 +1932,20 @@ impl eframe::App for UiViewerApp {
                     ui.weak("不配置时自动使用 uiautomator dump（功能不受影响）");
                     ui.separator();
                     let ready = self.config_ready();
-                    let btn = egui::Button::new("完成配置并进入")
-                        .fill(if ready {
-                            Color32::from_rgb(40, 150, 70)
+                    let dark = ui.visuals().dark_mode;
+                    let btn = egui::Button::new(
+                        egui::RichText::new("完成配置并进入").size(13.5).color(if ready {
+                            crate::theme::c_on_accent(dark)
                         } else {
-                            Color32::from_gray(120)
-                        });
+                            c_text_dim(dark)
+                        }),
+                    )
+                    .fill(if ready {
+                        c_accent(dark)
+                    } else {
+                        crate::theme::c_surface(dark)
+                    })
+                    .min_size(Vec2::new(ui.available_width().max(120.0), 30.0));
                     if ui.add_enabled(ready, btn).clicked() {
                         self.refresh_devices();
                         self.configured = true;
@@ -2000,17 +1976,20 @@ impl eframe::App for UiViewerApp {
             .max_width(460.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.heading(if self.op_mode { "设备 / 应用" } else { "元素属性" });
-                    if self.op_mode {
-                        if ui.button("↻ 刷新").clicked() {
-                            self.panel_refresh();
+                ui.add_space(2.0);
+                crate::theme::panel_header(
+                    ui,
+                    if self.op_mode { "设备 / 应用" } else { "元素属性" },
+                    |ui| {
+                        if self.op_mode {
+                            if ui.button("↻ 刷新").clicked() {
+                                self.panel_refresh();
+                            }
+                        } else if let Some(id) = self.selected {
+                            ui.weak(format!("id = {id}"));
                         }
-                    } else if let Some(id) = self.selected {
-                        ui.weak(format!("id = {id}"));
-                    }
-                });
+                    },
+                );
                 if self.op_mode {
                     ui.separator();
                     egui::ScrollArea::vertical()
@@ -2045,17 +2024,16 @@ impl eframe::App for UiViewerApp {
             .max_width(720.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if self.op_mode {
-                        ui.heading("录制控制");
-                    } else {
-                        ui.heading("UI 层级结构");
+                ui.add_space(2.0);
+                if self.op_mode {
+                    crate::theme::panel_header(ui, "录制控制", |_ui| {});
+                } else {
+                    crate::theme::panel_header(ui, "UI 层级结构", |ui| {
                         if self.tree.is_some() {
                             ui.weak(format!("{} 个节点", self.tree_count));
                         }
-                    }
-                });
+                    });
+                }
                 if self.op_mode {
                     ui.separator();
                     ui.label("文本输入:");
@@ -2072,11 +2050,18 @@ impl eframe::App for UiViewerApp {
                     ui.separator();
                     ui.label("录制 / 回放:");
                     let rec_label = if self.recording { "■ 停止录制" } else { "● 开始录制" };
-                    let rec_btn = egui::Button::new(rec_label).fill(if self.recording {
-                        Color32::from_rgb(200, 40, 40)
+                    let dark = ui.visuals().dark_mode;
+                    let rec_btn = egui::Button::new(
+                        egui::RichText::new(rec_label)
+                            .size(13.5)
+                            .color(crate::theme::c_on_accent(dark)),
+                    )
+                    .fill(if self.recording {
+                        c_danger(dark)
                     } else {
-                        Color32::from_rgb(40, 150, 70)
-                    });
+                        c_success(dark)
+                    })
+                    .min_size(Vec2::new(ui.available_width().max(120.0), 28.0));
                     if ui.add(rec_btn).clicked() {
                         self.recording = !self.recording;
                         if self.recording {
@@ -2274,51 +2259,56 @@ impl eframe::App for UiViewerApp {
             // Because the side panels are always shown, this toolbar keeps a
             // constant width and the buttons never jump when switching modes.
             ui.horizontal_wrapped(|ui| {
-                ui.label("模式:");
                 let enabled = self.configured;
-                if ui
-                    .add_enabled(enabled, egui::SelectableLabel::new(!self.op_mode, "查看 UI"))
-                    .clicked()
-                {
-                    // Always re-capture on (re)entering view mode: the device
-                    // screen may have changed while operating, so refresh the
-                    // screenshot + hierarchy instead of reusing the stale dump.
-                    self.op_mode = false;
-                    if !self.capturing {
-                        self.start_capture();
+                let dark = ui.visuals().dark_mode;
+                ui.label(egui::RichText::new("模式").size(12.0).color(c_text_dim(dark)));
+                let picked = segmented(
+                    ui,
+                    &[(false, "查看 UI"), (true, "操作设备")],
+                    self.op_mode,
+                    enabled,
+                );
+                match picked {
+                    Some(false) => {
+                        // Always re-capture on (re)entering view mode: the device
+                        // screen may have changed while operating, so refresh the
+                        // screenshot + hierarchy instead of reusing the stale dump.
+                        self.op_mode = false;
+                        if !self.capturing {
+                            self.start_capture();
+                        }
                     }
-                }
-                if ui
-                    .add_enabled(enabled, egui::SelectableLabel::new(self.op_mode, "操作设备"))
-                    .clicked()
-                {
-                    if !self.op_mode {
-                        self.op_mode = true;
-                        if !self.live_started {
-                            self.refresh_devices();
-                            let auto_connect = if self.devices.is_empty() {
-                                true
-                            } else if self.devices.len() == 1 {
-                                self.live_serial_hint = self.devices[0].clone();
-                                true
-                            } else if !self.live_serial_hint.is_empty()
-                                && self.devices.iter().any(|d| d == &self.live_serial_hint)
-                            {
-                                true
-                            } else {
-                                self.status =
-                                    "检测到多台设备，请在下方选择目标设备后点击「连接」。"
-                                        .to_string();
-                                false
-                            };
-                            if auto_connect {
-                                self.start_live();
+                    Some(true) => {
+                        if !self.op_mode {
+                            self.op_mode = true;
+                            if !self.live_started {
+                                self.refresh_devices();
+                                let auto_connect = if self.devices.is_empty() {
+                                    true
+                                } else if self.devices.len() == 1 {
+                                    self.live_serial_hint = self.devices[0].clone();
+                                    true
+                                } else if !self.live_serial_hint.is_empty()
+                                    && self.devices.iter().any(|d| d == &self.live_serial_hint)
+                                {
+                                    true
+                                } else {
+                                    self.status =
+                                        "检测到多台设备，请在下方选择目标设备后点击「连接」。"
+                                            .to_string();
+                                    false
+                                };
+                                if auto_connect {
+                                    self.start_live();
+                                }
                             }
                         }
                     }
+                    None => {}
                 }
+                ui.add_space(6.0);
                 ui.separator();
-                ui.label("缩放:");
+                ui.label(egui::RichText::new("缩放").size(12.0).color(c_text_dim(dark)));
                 ui.add(egui::Slider::new(&mut self.zoom, 0.5..=4.0).text("x"));
                 if !self.op_mode && ui.button("适配").clicked() {
                     self.zoom = 1.0;
@@ -2898,7 +2888,17 @@ fn render_props(ui: &mut egui::Ui, node: &Node) {
         for k in keys {
             let v = node.attrs.get(k.as_str()).map(|s| s.as_str()).unwrap_or("");
             ui.label(egui::RichText::new(k).weak());
-            ui.label(v);
+            // Long attribute values (e.g. a TextView's full text) can consume
+            // the entire side panel and push everything else off-screen.
+            // Truncate visually while still exposing the full value on hover.
+            const MAX_CHARS: usize = 200;
+            if v.chars().count() > MAX_CHARS {
+                let truncated: String = v.chars().take(MAX_CHARS).collect();
+                ui.label(format!("{truncated}…"))
+                    .on_hover_text(format!("{k}: {v}"));
+            } else {
+                ui.label(v);
+            }
             ui.end_row();
         }
     });

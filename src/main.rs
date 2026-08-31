@@ -20,8 +20,10 @@ fn main() -> eframe::Result<()> {
         "Android UI Viewer",
         options,
         Box::new(|cc| {
-            app::UiViewerApp::setup_fonts(&cc.egui_ctx);
-            Box::new(app::UiViewerApp::new())
+            let scale = app::UiViewerApp::setup_fonts(&cc.egui_ctx);
+            let mut viewer = app::UiViewerApp::new();
+            viewer.set_ui_scale(scale);
+            Box::new(viewer)
         }),
     )
 }

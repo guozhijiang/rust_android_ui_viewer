@@ -100,6 +100,59 @@ body {
   flex: 1;
   min-height: 0;
 }
+/* Collapsing a side pane shrinks its column to a narrow handle and hands the
+   freed width to the picture. Deliberately no transition: fitView() reads the
+   new viewport size synchronously right after the toggle, and an animated
+   column would feed it an intermediate width and mis-scale the frame. */
+#layout.left-collapsed { grid-template-columns: 28px 1fr 360px; }
+#layout.right-collapsed { grid-template-columns: 300px 1fr 28px; }
+#layout.left-collapsed.right-collapsed { grid-template-columns: 28px 1fr 28px; }
+
+.pane-collapse {
+  margin-left: auto;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+.pane-collapse:hover {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--panel-2);
+}
+
+/* Only visible while the pane is collapsed: a vertical strip that re-opens it.
+   text-orientation keeps the arrow glyph upright instead of rotating it. */
+.collapsed-handle { display: none; }
+.pane.collapsed > *:not(.collapsed-handle) { display: none !important; }
+.pane.collapsed .collapsed-handle {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  padding: 10px 0;
+  background: var(--panel);
+  color: var(--muted);
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  letter-spacing: 2px;
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+}
+.pane.collapsed .collapsed-handle:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
 
 .pane { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); }
 #tree { border-right: none; }

@@ -650,6 +650,52 @@ function fitView() {
   applyTransform();
 }
 
+// ---- Collapsible side panes -------------------------------------------------
+// Either side pane collapses to a narrow handle so the picture gets the freed
+// width. fitView() bails out on its own when nothing is on the canvas yet, so
+// it is safe to call unconditionally here.
+const COLLAPSE_KEY = "auv.paneCollapse";
+const paneCollapsed = { left: false, right: false };
+
+function setPaneCollapsed(side, collapsed, skipFit) {
+  const layout = $("#layout");
+  const pane = side === "left" ? $("#props") : $("#tree");
+  if (!layout || !pane) return;
+  pane.classList.toggle("collapsed", collapsed);
+  layout.classList.toggle(side + "-collapsed", collapsed);
+  paneCollapsed[side] = collapsed;
+  try {
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify(paneCollapsed));
+  } catch (e) {
+    // Private mode or storage disabled — the toggle still works this session.
+  }
+  // The canvas width just changed; refit so the frame stays centred.
+  if (!skipFit) fitView();
+}
+
+function initPaneCollapse() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "{}");
+    if (saved && typeof saved === "object") {
+      paneCollapsed.left = !!saved.left;
+      paneCollapsed.right = !!saved.right;
+    }
+  } catch (e) {
+    // Malformed value — fall back to both panes expanded.
+  }
+  setPaneCollapsed("left", paneCollapsed.left, true);
+  setPaneCollapsed("right", paneCollapsed.right, true);
+}
+
+document.querySelectorAll("[data-collapse]").forEach((btn) => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const side = btn.dataset.collapse;
+    if (side !== "left" && side !== "right") return;
+    setPaneCollapsed(side, !paneCollapsed[side]);
+  });
+});
+
 function clampPan() {
   const vp = $("#viewport");
   const { w, h } = currentViewSize();
@@ -2024,3 +2070,4 @@ setInterval(() => refreshDevices(true), 10000);
 refreshDevices();
 updateZoomLabel();
 loadU2Status();
+initPaneCollapse();
