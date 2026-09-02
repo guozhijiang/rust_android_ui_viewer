@@ -562,7 +562,7 @@ impl UiViewerApp {
             record_rx: None,
             replay_loops: 0,
             replay_speed: 1.0,
-            show_config: true,
+            show_config: false,
             configured: false,
             config_just_completed: false,
             last_hier: None,
@@ -1162,16 +1162,12 @@ impl UiViewerApp {
 
     // ---- Left-panel UI (operate mode): device info / apps / settings ----
     fn render_dev_panel(&mut self, ui: &mut egui::Ui) {
+        // 刷新按钮只保留面板标题栏的那一个（同样调用 panel_refresh），
+        // 这里不再重复放置第二个刷新入口。
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.pan_tab, "设备".to_string(), "设备信息");
             ui.selectable_value(&mut self.pan_tab, "应用".to_string(), "应用");
             ui.selectable_value(&mut self.pan_tab, "设置".to_string(), "系统设置");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("↻ 刷新").clicked() {
-                    self.panel_loaded = false;
-                    self.panel_refresh();
-                }
-            });
         });
         ui.add_space(4.0);
         ui.separator();
@@ -1429,6 +1425,7 @@ impl eframe::App for UiViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Apply theme + density first so every panel below uses the chosen look.
         self.apply_look(ctx);
+
         // Consume a pending "jump to selected node" request (set on the previous
         // frame when an element was selected). `jump` drives this frame's scroll.
         let jump = self.jump_to.take();
@@ -1760,10 +1757,18 @@ impl eframe::App for UiViewerApp {
             });
             ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
+                // 坐标槽位固定占位：无 hover 时显示暗色占位符。
+                // 若随 hover 出现/消失，顶栏布局会跟着跳（"晃动"的根源）。
                 if let Some((x, y)) = self.hover_pix {
                     ui.monospace(format!("坐标: ({x}, {y})"));
-                    ui.separator();
+                } else {
+                    ui.label(
+                        egui::RichText::new("坐标: (--, ---)")
+                            .monospace()
+                            .weak(),
+                    );
                 }
+                ui.separator();
                 let dark = ui.visuals().dark_mode;
                 let status_color = if self.status.contains("失败")
                     || self.status.contains("错误")
@@ -1977,6 +1982,7 @@ impl eframe::App for UiViewerApp {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.add_space(2.0);
+                crate::theme::compact_fonts(ui);
                 crate::theme::panel_header(
                     ui,
                     if self.op_mode { "设备 / 应用" } else { "元素属性" },
@@ -2004,8 +2010,12 @@ impl eframe::App for UiViewerApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if let Some(id) = self.selected {
-                            if let Some(node) = self.tree.as_ref().and_then(|t| t.find(id)) {
-                                render_props(ui, node);
+                            // Clone the node so the attrs borrow ends before we
+                            // hand &mut self.status to the context menus.
+                            let node =
+                                self.tree.as_ref().and_then(|t| t.find(id)).cloned();
+                            if let Some(node) = node {
+                                render_props(ui, &node, &mut self.status);
                             } else {
                                 ui.label("所选元素已不存在。");
                             }
@@ -2025,6 +2035,7 @@ impl eframe::App for UiViewerApp {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.add_space(2.0);
+                crate::theme::compact_fonts(ui);
                 if self.op_mode {
                     crate::theme::panel_header(ui, "录制控制", |_ui| {});
                 } else {
@@ -2224,6 +2235,7 @@ impl eframe::App for UiViewerApp {
                                 &mut self.hovered_tree,
                                 &mut self.jump_to,
                                 jump,
+                                &mut self.status,
                             );
                         } else {
                             ui.label("尚未加载界面层级。");
@@ -2815,6 +2827,7 @@ fn render_tree(
     hovered_tree: &mut Option<usize>,
     pending: &mut Option<usize>,
     jump: Option<usize>,
+    status: &mut String,
 ) {
     if !search.is_empty() && !node.subtree_matches(search) {
         return;
@@ -2830,7 +2843,17 @@ fn render_tree(
         .open(if is_ancestor { Some(true) } else { None })
         .show(ui, |inner| {
             for c in &node.children {
-                render_tree(inner, c, depth + 1, search, selected, hovered_tree, pending, jump);
+                render_tree(
+                    inner,
+                    c,
+                    depth + 1,
+                    search,
+                    selected,
+                    hovered_tree,
+                    pending,
+                    jump,
+                    status,
+                );
             }
         });
 
@@ -2844,6 +2867,9 @@ fn render_tree(
         *selected = Some(node.id);
         *pending = Some(node.id);
     }
+
+    // Right-click a tree node to copy its key attributes.
+    header.context_menu(|ui| tree_copy_menu(ui, status, node));
 
     if ui.is_rect_visible(header.rect) {
         // Highlight the selected row in the tree so selection stays visible
@@ -2874,42 +2900,133 @@ fn render_tree(
 
 // ----- Properties rendering -----
 
-fn render_props(ui: &mut egui::Ui, node: &Node) {
-    // Wrap long values instead of letting a single wide line expand the panel
-    // and cover the screenshot / hierarchy tree.
-    ui.style_mut().wrap = Some(true);
+/// Copy `value` to the system clipboard and surface feedback in the status bar.
+fn menu_copy(ui: &mut egui::Ui, status: &mut String, label: &str, value: &str) {
+    let chars = value.chars().count();
+    let show = if chars > 42 {
+        format!("{}…", value.chars().take(42).collect::<String>())
+    } else {
+        value.to_string()
+    };
+    if ui.button(format!("复制 {label}: {show}")).clicked() {
+        ui.ctx().output_mut(|o| o.copied_text = value.to_string());
+        *status = format!("已复制 {label} 到剪贴板。");
+        ui.close_menu();
+    }
+}
+
+/// Right-click menu for a hierarchy-tree node: copy the commonly used
+/// attributes individually, or the whole attribute block at once.
+fn tree_copy_menu(ui: &mut egui::Ui, status: &mut String, node: &Node) {
+    let get = |k: &str| node.attrs.get(k).cloned().unwrap_or_default();
+    let class = get("class");
+    if !class.is_empty() {
+        menu_copy(ui, status, "class", &class);
+    }
+    let text = get("text");
+    if !text.is_empty() {
+        menu_copy(ui, status, "text", &text);
+    }
+    let rid = get("resource-id");
+    if !rid.is_empty() {
+        menu_copy(ui, status, "resource-id", &rid);
+    }
+    let desc = get("content-desc");
+    if !desc.is_empty() {
+        menu_copy(ui, status, "content-desc", &desc);
+    }
+    if let Some(b) = &node.bounds {
+        let bs = format!("[{},{}][{},{}]", b.left, b.top, b.right, b.bottom);
+        menu_copy(ui, status, "bounds", &bs);
+    }
+    ui.separator();
+    let all = node
+        .attrs
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    menu_copy(ui, status, "全部属性", &all);
+}
+
+fn render_props(ui: &mut egui::Ui, node: &Node, status: &mut String) {
+    let dark = ui.visuals().dark_mode;
     let class = node.attrs.get("class").cloned().unwrap_or_default();
-    ui.label(egui::RichText::new(class).strong());
+    let class_resp = ui.label(egui::RichText::new(class.as_str()).strong());
+    class_resp.context_menu(|ui| menu_copy(ui, status, "class", &class));
     ui.separator();
 
     let mut keys: Vec<&String> = node.attrs.keys().collect();
     keys.sort();
-    egui::Grid::new("props").striped(true).show(ui, |ui| {
-        for k in keys {
-            let v = node.attrs.get(k.as_str()).map(|s| s.as_str()).unwrap_or("");
-            ui.label(egui::RichText::new(k).weak());
-            // Long attribute values (e.g. a TextView's full text) can consume
-            // the entire side panel and push everything else off-screen.
-            // Truncate visually while still exposing the full value on hover.
-            const MAX_CHARS: usize = 200;
-            if v.chars().count() > MAX_CHARS {
-                let truncated: String = v.chars().take(MAX_CHARS).collect();
-                ui.label(format!("{truncated}…"))
-                    .on_hover_text(format!("{k}: {v}"));
-            } else {
-                ui.label(v);
-            }
-            ui.end_row();
-        }
-    });
+
+    // ── painter 直绘方案 ──
+    // 之前的 ui.label() 无论怎么设 wrap 都会被 egui 布局引擎在极窄处断行。
+    // 改用 painter.text() 在绝对坐标画字——物理上不存在换行，
+    // 超宽内容在 Rust 层按像素宽度手动截断。
+    const KEY_W: f32 = 118.0; // 键列起点偏移（值列从此 x 开始）
+    const ROW_H: f32 = 17.0;
+    const PAD_L: f32 = 4.0;
+    // monospace 11px 每字符约 6.6px（epaint 默认等宽字体经验值）
+    const CHAR_W: f32 = 6.6;
+
+    for k in keys {
+        let v = node.attrs.get(k.as_str()).map(|s| s.as_str()).unwrap_or("");
+        let avail = ui.available_width();
+        // Sense::click() so right-click opens the copy context menu
+        // (hover-only responses never receive secondary clicks).
+        let (rect, resp) =
+            ui.allocate_exact_size(Vec2::new(avail, ROW_H), egui::Sense::click());
+
+        // ── 键名：固定列宽内绘制，超宽按像素截断 ──
+        let key_full = format!("{k}:");
+        let key_max = ((KEY_W - PAD_L - 6.0) / CHAR_W) as usize; // 留 6px 余量
+        let key_display = if k.len() > key_max {
+            format!("{}…:", &k[..key_max.max(1)])
+        } else {
+            key_full
+        };
+        ui.painter().text(
+            egui::pos2(rect.left() + PAD_L, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            key_display,
+            egui::FontId::monospace(11.0),
+            crate::theme::c_text_dim(dark),
+        );
+
+        // ── 值：从 KEY_W 起画到行尾，超宽截断 + 悬停看完整 ──
+        let val_x = rect.left() + KEY_W;
+        let val_max_w = rect.right() - val_x - 4.0;
+        let val_max_chars = (val_max_w / CHAR_W).max(3.0) as usize;
+        let val_display = if v.chars().count() > val_max_chars {
+            format!("{}…", v.chars().take(val_max_chars).collect::<String>())
+        } else {
+            v.to_string()
+        };
+        ui.painter().text(
+            egui::pos2(val_x, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &val_display,
+            egui::FontId::monospace(11.0),
+            crate::theme::c_text(dark),
+        );
+
+        let resp = resp.on_hover_text(format!("{k}: {v}"));
+        // Right-click a row: copy the value alone, or the whole "key: value" line.
+        resp.context_menu(|ui| {
+            menu_copy(ui, status, k, v);
+            ui.separator();
+            menu_copy(ui, status, &format!("{k}（整行）"), &format!("{k}: {v}"));
+        });
+    }
 
     if let Some(b) = &node.bounds {
+        let bs = format!("[{},{}][{},{}]", b.left, b.top, b.right, b.bottom);
         ui.separator();
-        ui.label(format!(
-            "bounds: [{},{}][{},{}]",
-            b.left, b.top, b.right, b.bottom
-        ));
-        ui.label(format!("尺寸: {} x {} px", b.width(), b.height()));
+        let r1 = ui.label(format!("bounds: {bs}"));
+        r1.context_menu(|ui| menu_copy(ui, status, "bounds", &bs));
+        let size = format!("尺寸: {} x {} px", b.width(), b.height());
+        let r2 = ui.label(size);
+        r2.context_menu(|ui| menu_copy(ui, status, "尺寸", &format!("{} x {}", b.width(), b.height())));
     }
 }
 

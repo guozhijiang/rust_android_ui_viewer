@@ -383,6 +383,20 @@ pub fn segmented<T: Copy + PartialEq>(
     clicked
 }
 
+/// 缩小侧边面板（属性 / 层级树）的字号，让同屏能放下更多信息、
+/// 长属性值不那么容易换行溢出。仅作用于调用处的 ui，不影响顶栏/中央。
+pub fn compact_fonts(ui: &mut egui::Ui) {
+    let st = ui.style_mut();
+    st.text_styles.insert(egui::TextStyle::Small, FontId::proportional(10.5));
+    st.text_styles.insert(egui::TextStyle::Body, FontId::proportional(12.0));
+    st.text_styles.insert(egui::TextStyle::Monospace, FontId::monospace(11.0));
+    st.text_styles.insert(egui::TextStyle::Button, FontId::proportional(12.0));
+    st.text_styles.insert(egui::TextStyle::Heading, FontId::proportional(13.0));
+    // 紧凑行距，信息更密而不乱。
+    st.spacing.item_spacing = Vec2::new(6.0, 4.0);
+    st.spacing.button_padding = Vec2::new(8.0, 4.0);
+}
+
 /// 面板标题：一条强调色竖条 + 标题，右侧可追加一个控件或说明。
 /// 让三个面板的头部风格统一，也避免 17px 的 heading 显得过重。
 pub fn panel_header(
@@ -396,7 +410,7 @@ pub fn panel_header(
         ui.painter()
             .rect_filled(bar, Rounding::same(1.5), c_accent(dark));
         ui.add_space(5.0);
-        ui.label(egui::RichText::new(title).size(15.0).color(c_text(dark)));
+        ui.label(egui::RichText::new(title).size(14.0).color(c_text(dark)));
         add_right(ui);
     });
 }
