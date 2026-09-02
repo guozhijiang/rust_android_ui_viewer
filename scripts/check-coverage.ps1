@@ -16,7 +16,8 @@ $CovDir = Join-Path $Root 'coverage'
 New-Item -ItemType Directory -Force -Path $CovDir | Out-Null
 
 # Modules that need a device / GUI context and are not unit-testable in CI.
-$Ignore = 'src[\\/](app|live|scrcpy|adb|u2|main|lib)\.rs'
+# theme.rs is pure egui styling/painting and likewise cannot be covered here.
+$Ignore = 'src[\\/](app|live|scrcpy|adb|u2|main|lib|theme)\.rs'
 
 cargo llvm-cov clean --workspace
 

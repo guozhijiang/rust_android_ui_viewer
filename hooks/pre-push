@@ -2,15 +2,16 @@
 # pre-push hook: block push unless the unit/integration tests pass AND the
 # coverage gate is met (lines >= 90%, regions >= 85%).
 #
-# Device/GUI modules (app, live, scrcpy, adb, u2, main, lib) are excluded from
-# the coverage gate because they need a live device / running egui window.
+# Device/GUI modules (app, live, scrcpy, adb, u2, main, lib) and the pure
+# styling module theme are excluded from the coverage gate because they need
+# a live device / running egui window to exercise.
 set -e
 
 mkdir -p coverage
 echo "[pre-push] Running tests + coverage gate (lines >= 90%, regions >= 85%)..."
 cargo llvm-cov clean --workspace
 cargo llvm-cov test --workspace \
-  --ignore-filename-regex 'src[\\/](app|live|scrcpy|adb|u2|main|lib)\.rs' \
+  --ignore-filename-regex 'src[\\/](app|live|scrcpy|adb|u2|main|lib|theme)\.rs' \
   --lcov --output-path coverage/lcov.info \
   --fail-under-lines 90 \
   --fail-under-regions 85
