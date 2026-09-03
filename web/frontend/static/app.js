@@ -16,7 +16,6 @@ const state = {
   tx: 0,
   ty: 0,
   search: "",
-  treeFrom: "capture",
   treeScaleX: 1,
   treeScaleY: 1,
   zoom: 1, // user zoom multiplier (inspect mode)
@@ -31,8 +30,6 @@ const live = {
   codec: null,
   videoW: 0,
   videoH: 0,
-  treePhysicalW: 0,
-  treePhysicalH: 0,
   treeScale: 1,
   kbd: false,
   recoverTimer: null,
@@ -223,7 +220,6 @@ function treeToXml(node) {
 
 function loadCapture(data) {
   state.tree = data.tree;
-  state.treeFrom = "capture";
   state.treeScaleX = 1;
   state.treeScaleY = 1;
   state.image = data.image;
@@ -496,13 +492,10 @@ const FAINT_NODE_LIMIT = 800;
 function drawOverlay() {
   const svg = $("#overlay");
   if (live.active) {
-    if (!$("#liveOverlayChk").checked) {
-      while (svg.firstChild) svg.removeChild(svg.firstChild);
-      return;
-    }
-    const w = live.frameW || live.videoW;
-    const h = live.frameH || live.videoH;
-    if (w && h) setOverlaySize(w, h);
+    // Live mode does not overlay a UI tree (aligned with the Rust live view —
+    // element inspection is capture/inspect-only).
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    return;
   } else if (state.naturalW && state.naturalH) {
     // Inspect mode: the overlay must follow the screenshot size, not whatever
     // the live feed last used (otherwise highlights are scaled wrong).
@@ -729,15 +722,6 @@ function toNatural(e) {
   return { x, y };
 }
 
-function liveToTree(x, y) {
-  const sx = state.treeScaleX || 1;
-  const sy = state.treeScaleY || 1;
-  if (sx !== 1 || sy !== 1) {
-    return { x: Math.round(x / sx), y: Math.round(y / sy) };
-  }
-  return { x, y };
-}
-
 function updateZoomLabel() {
   $("#zoomLabel").textContent = state.zoom.toFixed(2) + "x";
 }
@@ -824,14 +808,6 @@ window.addEventListener("mouseup", (e) => {
           recordStep({ action: "swipe", from_fx: t.startX, from_fy: t.startY, to_fx: nat.x, to_fy: nat.y });
         } else {
           recordStep({ action: elapsed > 500 ? "long_tap" : "tap", fx: t.startX, fy: t.startY });
-        }
-      }
-      if (!t.moved && nat && state.tree && $("#liveOverlayChk").checked) {
-        const treePt = liveToTree(nat.x, nat.y);
-        const id = hitTest(treePt.x, treePt.y);
-        if (id !== null) {
-          selectNode(id, false);
-          scrollTreeTo(id);
         }
       }
     } else if (e.button === 2 && touch2) {
@@ -1007,17 +983,9 @@ function handleSize(w, h) {
 }
 
 function updateTreeScale() {
-  const vw = live.frameW || live.videoW;
-  const vh = live.frameH || live.videoH;
-  // Only scale tree coords to video size while actually showing the live feed.
-  // In inspect mode the screenshot is already at physical resolution, so the
-  // overlay must use 1:1 coords (otherwise highlights land in the wrong place).
-  if (live.active && state.treeFrom === "live" && live.treePhysicalW && vw) {
-    state.treeScaleX = vw / live.treePhysicalW;
-    state.treeScaleY = live.treePhysicalH && vh ? vh / live.treePhysicalH : 1;
-  } else {
-    state.treeScaleX = 1; state.treeScaleY = 1;
-  }
+  // Live mode no longer carries a UI tree, and the inspect screenshot is
+  // already at physical resolution — tree coords are always 1:1 now.
+  state.treeScaleX = 1; state.treeScaleY = 1;
 }
 
 function updateLiveDebug() {
@@ -1027,13 +995,8 @@ function updateLiveDebug() {
   if (!live_active) { el.style.display = "none"; return; }
   const vw = live.frameW || live.videoW;
   const vh = live.frameH || live.videoH;
-  const pw = live.treePhysicalW;
-  const ph = live.treePhysicalH;
-  if (state.treeFrom === "live" && pw && ph) {
-    el.textContent = `scale ${state.treeScaleX.toFixed(3)}×${state.treeScaleY.toFixed(3)}  ${vw}×${vh}→${pw}×${ph}`;
-  } else {
-    el.textContent = `frame ${vw}×${vh}`;
-  }
+  if (!vw) { el.style.display = "none"; return; }
+  el.textContent = `frame ${vw}×${vh}`;
   el.style.display = "";
 }
 
@@ -1180,53 +1143,6 @@ function updateConnectBtn() {
   b.classList.toggle("live-on", live.connected);
 }
 
-function loadLiveTree(data) {
-  state.tree = data.tree;
-  state.treeFrom = "live";
-  // Do NOT overwrite state.naturalW/H: those describe the *screenshot* and are
-  // what fitView()/drawOverlay() use to size the inspect view. Overwriting them
-  // with the tree's physical size made the screenshot render at the wrong size
-  // (and overflow the viewport) whenever the two differed, e.g. after rotation.
-  // The live tree's own physical size is tracked in live.treePhysicalW/H.
-  state.selectedId = null;
-  live.treePhysicalW = data.width;
-  live.treePhysicalH = data.height;
-  updateTreeScale();
-  state.nodes.clear();
-  state.parents.clear();
-  indexTree(data.tree, null);
-  // Match the actually-decoded frame size (same precedence as drawOverlay) so
-  // the tree overlay lines up with what is painted on the canvas.
-  const ow = live.frameW || live.videoW || data.width;
-  const oh = live.frameH || live.videoH || data.height;
-  setOverlaySize(ow, oh);
-  $("#nodeCount").textContent = state.nodes.size + " 节点";
-  renderProps(null);
-  renderTree();
-  drawOverlay();
-  updateLiveDebug();
-  setStatus(`已抓取 UI 树 · ${state.nodes.size} 节点`);
-}
-
-async function liveDump() {
-  if (!live.connected) { setStatus("请先连接设备", true); return; }
-  setStatus("抓取 UI 树…");
-  try {
-    const res = await fetch("/api/capture?serial=" + encodeURIComponent(currentSerial()), { method: "POST" });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || res.statusText);
-    }
-    loadLiveTree(await res.json());
-    // Grabbing the tree is pointless without showing it, so turn the overlay
-    // on automatically (otherwise the button looks like it did nothing).
-    $("#liveOverlayChk").checked = true;
-    drawOverlay();
-  } catch (e) {
-    setStatus("抓取失败: " + e.message, true);
-  }
-}
-
 // --------------------------------------------------------------------------- //
 // Keyboard mapping
 // --------------------------------------------------------------------------- //
@@ -1323,34 +1239,125 @@ window.addEventListener("paste", (e) => {
 // --------------------------------------------------------------------------- //
 // Recording / replay
 // --------------------------------------------------------------------------- //
+// Recording mirrors Rust record.rs: steps carry a UiSelector resolved from the
+// freshest UI hierarchy plus fractional coordinates (0..1) as fallback, and are
+// annotated with the foreground app (cached ~1.5s so bursts don't spawn one
+// `dumpsys` per step).
+let _lastTapSelector = null;   // Rust: last_tap_selector (text steps reuse it)
+let _appCache = { pkg: "", act: "", at: 0 };
+let _recTree = null;           // background-refreshed hierarchy while recording (live)
+let _recTreeTimer = null;
+
+async function recTreeRefresh() {
+  try {
+    const res = await fetch("/api/dump-ui?serial=" + encodeURIComponent(currentSerial()));
+    if (res.ok) _recTree = (await res.json()).tree || null;
+  } catch (e) { /* keep the previous tree; retry on the next tick */ }
+}
+
+function startRecTreeLoop() {
+  stopRecTreeLoop();
+  _recTree = null;
+  recTreeRefresh();
+  // Same idea as Rust's refresh_hierarchy_quiet: keep the hierarchy fresh in
+  // the background so recorded taps resolve to elements, not blind coords.
+  _recTreeTimer = setInterval(recTreeRefresh, 3000);
+}
+
+function stopRecTreeLoop() {
+  if (_recTreeTimer) { clearInterval(_recTreeTimer); _recTreeTimer = null; }
+  _recTree = null;
+}
+
+// Reference size for fractional coords: the live frame in live mode, the
+// screenshot in inspect mode.
+function frameSize() {
+  if (live.active) {
+    const w = live.frameW || live.videoW, h = live.frameH || live.videoH;
+    if (w && h) return { w, h };
+  }
+  if (state.naturalW && state.naturalH) return { w: state.naturalW, h: state.naturalH };
+  return null;
+}
+
+// Smallest node containing (x, y) → UiSelector (Rust: node_at / build_selector).
+function selectorAtPoint(tree, x, y) {
+  let best = null, bestArea = Infinity;
+  (function rec(node) {
+    const b = node.bounds;
+    if (b && x >= b.left && x <= b.right && y >= b.top && y <= b.bottom) {
+      const area = (b.right - b.left) * (b.bottom - b.top);
+      if (area < bestArea) {
+        bestArea = area;
+        const a = node.attrs || {};
+        const sel = {};
+        if (a["resource-id"]) sel.resource_id = a["resource-id"];
+        if (a["text"]) sel.text = a["text"];
+        if (a["content-desc"]) sel.content_desc = a["content-desc"];
+        if (a["class"]) sel.class = a["class"];
+        best = Object.keys(sel).length ? sel : null;
+      }
+    }
+    for (const c of node.children || []) rec(c);
+  })(tree);
+  return best;
+}
+
+async function annotateApp(step) {
+  const now = Date.now();
+  if (now - _appCache.at > 1500) {
+    _appCache.at = now;
+    try {
+      const res = await fetch("/api/current-app?serial=" + encodeURIComponent(currentSerial()));
+      if (res.ok) {
+        const d = await res.json();
+        _appCache.pkg = d.pkg || "";
+        _appCache.act = d.activity || "";
+      }
+    } catch (e) { /* offline: annotation is best-effort */ }
+  }
+  if (_appCache.pkg) { step.app = _appCache.pkg; step.activity = _appCache.act; }
+}
+
 function recordStep(step) {
   if (!rec.recording) return;
   step.ts = Date.now() / 1000;
-  // Try to resolve a selector from current tree
-  if ((step.fx != null) && (step.fy != null) && state.tree) {
-    const id = hitTest(Math.round(step.fx), Math.round(step.fy));
-    if (id !== null) step.selector = buildSelector(id);
+  // Selector from the freshest tree: inspect uses the captured tree; live uses
+  // the background-refreshed one (never the stale inspect screenshot tree).
+  const tree = live.active ? _recTree : state.tree;
+  if (tree) {
+    if (step.action === "swipe") {
+      if (step.from_fx != null && step.from_fy != null)
+        step.from_selector = selectorAtPoint(tree, Math.round(step.from_fx), Math.round(step.from_fy));
+      if (step.to_fx != null && step.to_fy != null)
+        step.to_selector = selectorAtPoint(tree, Math.round(step.to_fx), Math.round(step.to_fy));
+    } else if (step.fx != null && step.fy != null) {
+      step.selector = selectorAtPoint(tree, Math.round(step.fx), Math.round(step.fy));
+    }
   }
-  if (step.action === "swipe" && state.tree) {
-    const fid = hitTest(Math.round(step.from_fx), Math.round(step.from_fy));
-    const tid = hitTest(Math.round(step.to_fx), Math.round(step.to_fy));
-    if (fid !== null) step.from_selector = buildSelector(fid);
-    if (tid !== null) step.to_selector = buildSelector(tid);
+  // Rust: a text step targets whatever the last tap hit.
+  if (step.action === "text" && !step.selector && _lastTapSelector) {
+    step.selector = _lastTapSelector;
+  }
+  if (step.action === "tap" || step.action === "long_tap") {
+    _lastTapSelector = step.selector || null;
+  }
+  // Fractional coordinates 0..1 (resolution-independent, like Rust).
+  const size = frameSize();
+  if (size) {
+    if (step.fx != null) step.fx = step.fx / size.w;
+    if (step.fy != null) step.fy = step.fy / size.h;
+    if (step.from_fx != null) step.from_fx = step.from_fx / size.w;
+    if (step.from_fy != null) step.from_fy = step.from_fy / size.h;
+    if (step.to_fx != null) step.to_fx = step.to_fx / size.w;
+    if (step.to_fy != null) step.to_fy = step.to_fy / size.h;
   }
   rec.steps.push(step);
   renderRecSteps();
-}
-
-function buildSelector(id) {
-  const n = state.nodes.get(id);
-  if (!n) return null;
-  const a = n.attrs || {};
-  const sel = {};
-  if (a["resource-id"]) sel.resource_id = a["resource-id"];
-  if (a["text"]) sel.text = a["text"];
-  if (a["content-desc"]) sel.content_desc = a["content-desc"];
-  if (a["class"]) sel.class = a["class"];
-  return Object.keys(sel).length ? sel : null;
+  // Foreground-app annotation arrives asynchronously; re-render when it lands.
+  annotateApp(step).then(() => {
+    if (rec.steps.includes(step)) renderRecSteps();
+  });
 }
 
 function renderRecSteps() {
@@ -1376,16 +1383,27 @@ function renderRecSteps() {
     : (rec.replaying ? `回放中 ${rec.replayIdx + 1}/${rec.steps.length}` : `共 ${rec.steps.length} 步`);
   $("#recStatus").classList.toggle("recording", rec.recording);
   $("#recSave").disabled = rec.steps.length === 0;
+  $("#recSaveYaml").disabled = rec.steps.length === 0;
+}
+
+// Rust-style human-readable summary (record.rs describe).
+function selDesc(sel) {
+  if (!sel) return "";
+  const parts = [];
+  if (sel.resource_id) parts.push(`id=${sel.resource_id}`);
+  if (sel.text) parts.push(`text=${sel.text}`);
+  if (sel.content_desc) parts.push(`desc=${sel.content_desc}`);
+  return parts.join(",");
 }
 
 function describeStep(s) {
   switch (s.action) {
-    case "tap": return `tap (${Math.round(s.fx)}, ${Math.round(s.fy)})`;
-    case "long_tap": return `long_tap (${Math.round(s.fx)}, ${Math.round(s.fy)})`;
-    case "swipe": return `swipe (${Math.round(s.from_fx)},${Math.round(s.from_fy)}) → (${Math.round(s.to_fx)},${Math.round(s.to_fy)})`;
-    case "text": return `text "${(s.text || "").slice(0, 30)}"`;
-    case "key": return `key ${s.key || s.keycode || ""}`;
-    case "scroll": return `scroll (${Math.round(s.fx)}, ${Math.round(s.fy)})`;
+    case "tap": return `点击 [${selDesc(s.selector)}]`;
+    case "long_tap": return `长按 [${selDesc(s.selector)}]`;
+    case "swipe": return `滑动 ${selDesc(s.from_selector)}→${selDesc(s.to_selector)}`;
+    case "text": return `输入文本 "${(s.text || "").slice(0, 30)}"`;
+    case "key": return `按键 ${s.key || s.keycode || ""}`;
+    case "scroll": return `滚动 (${Math.round((s.fx || 0) * 100)}%, ${Math.round((s.fy || 0) * 100)}%)`;
     default: return s.action;
   }
 }
@@ -1397,10 +1415,15 @@ function toggleRecording() {
     rec.steps = [];
     rec.replayFailed = [];
     rec.replayIdx = null;
+    _lastTapSelector = null;
+    _appCache = { pkg: "", act: "", at: 0 };
+    // Keep a fresh hierarchy in the background so steps resolve to elements.
+    startRecTreeLoop();
     $("#recToggle").textContent = "■ 停止";
     $("#recToggle").classList.add("rec-on");
     setStatus("● 录制已开始");
   } else {
+    stopRecTreeLoop();
     $("#recToggle").textContent = "● 录制";
     $("#recToggle").classList.remove("rec-on");
     setStatus(`■ 录制已停止（共 ${rec.steps.length} 步）`);
@@ -1421,52 +1444,92 @@ function saveRecording() {
   setStatus(`已保存 ${rec.steps.length} 步录制`);
 }
 
-function loadRecording(file) {
-  const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      const steps = JSON.parse(reader.result);
-      if (!Array.isArray(steps) || !steps.length) {
-        setStatus("录制文件为空或格式错误", true);
-        return;
-      }
-      rec.steps = steps;
-      renderRecSteps();
-      startReplay();
-    } catch (e) {
-      setStatus("加载录制失败: " + e.message, true);
+// Save as Rust-desktop-compatible YAML: the backend converts the JSON steps
+// to exactly the serde_yaml shape the desktop app's `load_yaml` expects.
+async function saveRecordingYaml() {
+  if (!rec.steps.length) return;
+  try {
+    const res = await fetch("/api/save-recording-yaml", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(rec.steps),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
     }
-  };
-  reader.readAsText(file);
+    const text = await res.text();
+    const blob = new Blob([text], { type: "application/x-yaml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "recording_" + Date.now() + ".yaml";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setStatus(`已保存 ${rec.steps.length} 步录制为 YAML（Rust 版可加载）`);
+  } catch (e) {
+    setStatus("保存 YAML 失败: " + e.message, true);
+  }
+}
+
+// Load a recording produced by either flavor of the tool: the web version's
+// JSON or the Rust desktop version's YAML (identical field names). The file
+// text goes to /api/load-recording which sniffs JSON vs YAML and returns the
+// steps. Loading only fills the list — replay is a separate action (like the
+// Rust desktop app).
+async function loadRecording(file) {
+  const text = await file.text();
+  try {
+    const res = await fetch("/api/load-recording", { method: "POST", body: text });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
+    }
+    const d = await res.json();
+    rec.steps = d.steps;
+    rec.replayFailed = [];
+    rec.replayIdx = null;
+    renderRecSteps();
+    setStatus(`已加载 ${rec.steps.length} 步录制，点「▶ 回放」执行`);
+  } catch (e) {
+    setStatus("加载录制失败: " + e.message, true);
+  }
 }
 
 async function startReplay() {
   if (rec.replaying) { rec.replayAbort = true; return; }
-  if (!live.connected) { setStatus("回放需先连接设备", true); return; }
   rec.replaying = true;
   rec.replayAbort = false;
   rec.replayFailed = [];
   rec.replayIdx = null;
   rec.speed = parseFloat($("#recSpeed").value) || 1;
   rec.loops = parseInt($("#recLoops").value, 10) || 0;
+  _screenSize = null; // re-read for the current device
   $("#recToggle").disabled = true;
-  const totalLoops = rec.loops + 1;
+  const totalLoops = rec.loops + 1; // UI semantics: 0 = single pass
   for (let loop = 0; loop < totalLoops && !rec.replayAbort; loop++) {
     for (let i = 0; i < rec.steps.length && !rec.replayAbort; i++) {
+      // Reuse the recorded pace (scaled by speed), clamped like Rust (≤30s).
+      if (i > 0) {
+        const gap = Math.max(0, (rec.steps[i].ts || 0) - (rec.steps[i - 1].ts || 0));
+        const wait = Math.min(30, gap / rec.speed);
+        if (wait > 0.001) await sleep(wait * 1000);
+      }
       rec.replayIdx = i;
       renderRecSteps();
-      const s = rec.steps[i];
       try {
-        await replayStep(s);
+        const ok = await replayStep(rec.steps[i]);
+        if (ok === false) rec.replayFailed.push(i);
       } catch (e) {
         rec.replayFailed.push(i);
-        renderRecSteps();
       }
-      // Inter-step delay (scaled by speed)
-      const delay = (s.ts && rec.steps[i + 1] && rec.steps[i + 1].ts)
-        ? Math.max(50, (rec.steps[i + 1].ts - s.ts) * 1000 / rec.speed)
-        : 200;
-      await sleep(delay);
+      renderRecSteps();
+      // Fixed post-step pause so animations settle (Rust: 600ms).
+      if (!rec.replayAbort) await sleep(600);
+    }
+    if (totalLoops > 1 && loop < totalLoops - 1 && !rec.replayAbort) {
+      setStatus(`第 ${loop + 1} 轮回放完成，准备下一轮…`);
+      await sleep(800);
     }
   }
   rec.replaying = false;
@@ -1477,104 +1540,206 @@ async function startReplay() {
   setStatus(failed === 0 ? "回放完成" : `回放完成，${failed} 步失败`);
 }
 
-// Replay coordinates are video-frame pixels — that is what scrcpy expects, and
-// it is exactly what recordStep stores (fx/fy come straight from toNatural()).
-// Node bounds live in *physical* device pixels, so a point resolved through a
-// selector must be scaled down by the tree scale before being sent.
-function selectorToVideo(sel) {
-  const pt = resolveSelector(sel);
-  if (!pt) return null;
-  return {
-    x: Math.round(pt.x * (state.treeScaleX || 1)),
-    y: Math.round(pt.y * (state.treeScaleY || 1)),
-  };
+// --------------------------------------------------------------------------- //
+// Replay point resolution (Rust record.rs `resolve` / `find_center`)
+// --------------------------------------------------------------------------- //
+
+let _screenSize = null; // cached {w, h} for the current device
+
+async function screenSize() {
+  if (_screenSize) return _screenSize;
+  try {
+    const res = await fetch("/api/screen-size?serial=" + encodeURIComponent(currentSerial()));
+    if (res.ok) {
+      const d = await res.json();
+      if (d.width > 0 && d.height > 0) {
+        _screenSize = { w: d.width, h: d.height };
+        return _screenSize;
+      }
+    }
+  } catch (e) { /* fall through to the Rust default */ }
+  _screenSize = { w: 1080, h: 1920 };
+  return _screenSize;
 }
 
-function stepPoint(s, xKey, yKey, selKey) {
-  const pt = s[selKey] ? selectorToVideo(s[selKey]) : null;
-  if (pt) return pt;
-  if (s[xKey] != null && s[yKey] != null) {
-    return { x: Math.round(s[xKey]), y: Math.round(s[yKey]) };
-  }
+// Smallest node matching `sel` → center in device px (Rust find_center).
+function findCenterInTree(tree, sel) {
+  let best = null, bestArea = Infinity;
+  (function rec(node) {
+    const a = node.attrs || {};
+    let m = true;
+    if (sel.resource_id != null && a["resource-id"] !== sel.resource_id) m = false;
+    if (m && sel.text != null && a["text"] !== sel.text) m = false;
+    if (m && sel.content_desc != null && a["content-desc"] !== sel.content_desc) m = false;
+    if (m && sel.class != null && a["class"] !== sel.class) m = false;
+    if (m && node.bounds) {
+      const area = (node.bounds.right - node.bounds.left) * (node.bounds.bottom - node.bounds.top);
+      if (area < bestArea) {
+        bestArea = area;
+        best = {
+          x: Math.round((node.bounds.left + node.bounds.right) / 2),
+          y: Math.round((node.bounds.top + node.bounds.bottom) / 2),
+        };
+      }
+    }
+    for (const c of node.children || []) rec(c);
+  })(tree);
+  return best;
+}
+
+async function fetchTree() {
+  try {
+    const res = await fetch("/api/dump-ui?serial=" + encodeURIComponent(currentSerial()));
+    if (res.ok) return (await res.json()).tree || null;
+  } catch (e) { /* offline */ }
   return null;
 }
 
-async function replayStep(s) {
-  switch (s.action) {
-    case "tap": {
-      const pt = stepPoint(s, "fx", "fy", "selector");
-      if (!pt) break;
-      sendControl({ type: "touch", action: 0, x: pt.x, y: pt.y, pointerId: 0 });
-      await sleep(50);
-      sendControl({ type: "touch", action: 1, x: pt.x, y: pt.y, pointerId: 0 });
-      break;
+// Resolve a step point to device pixels. When a selector exists it is retried
+// against freshly dumped hierarchies so the action waits for the expected
+// screen; on miss it falls back to fractional coords and reports `ok: false`
+// (the step gets flagged red, like Rust's ReplayMsg::Failed).
+async function resolvePoint(sel, fx, fy, tries) {
+  const size = await screenSize();
+  const fallback = () => ({
+    pt: { x: Math.round((fx ?? 0.5) * size.w), y: Math.round((fy ?? 0.5) * size.h) },
+    ok: !sel,
+  });
+  if (!sel) return fallback();
+  for (let attempt = 0; attempt < tries; attempt++) {
+    const tree = await fetchTree();
+    if (tree) {
+      const c = findCenterInTree(tree, sel);
+      if (c) return { pt: c, ok: true };
+      // Screen fetched but element absent: a few short retries cover
+      // animations/transitions, then give up (same as Rust).
+      if (attempt >= 3) break;
     }
-    case "long_tap": {
-      const pt = stepPoint(s, "fx", "fy", "selector");
-      if (!pt) break;
-      sendControl({ type: "touch", action: 0, x: pt.x, y: pt.y, pointerId: 0 });
-      await sleep(600);
-      sendControl({ type: "touch", action: 1, x: pt.x, y: pt.y, pointerId: 0 });
-      break;
+    await sleep(400);
+  }
+  return fallback();
+}
+
+// Resolve + convert to the coordinate space the injection path expects:
+// adb input wants device px; the live WS control channel wants video-frame px.
+async function replayPoint(s, xKey, yKey, selKey, tries) {
+  const r = await resolvePoint(s[selKey], s[xKey], s[yKey], tries);
+  if (!r.pt) return r;
+  if (live.connected) {
+    const size = await screenSize();
+    const vw = live.videoW || live.frameW, vh = live.videoH || live.frameH;
+    if (vw && size.w) {
+      return {
+        pt: { x: Math.round(r.pt.x * vw / size.w), y: Math.round(r.pt.y * vh / size.h) },
+        ok: r.ok,
+      };
     }
-    case "swipe": {
-      const from = stepPoint(s, "from_fx", "from_fy", "from_selector");
-      const to = stepPoint(s, "to_fx", "to_fy", "to_selector");
-      if (!from || !to) break;
-      const sx = from.x, sy = from.y, ex = to.x, ey = to.y;
-      sendControl({ type: "touch", action: 0, x: sx, y: sy, pointerId: 0 });
-      // Intermediate moves for smooth swipe
-      const steps = 10;
-      for (let k = 1; k <= steps; k++) {
-        const x = Math.round(sx + (ex - sx) * k / steps);
-        const y = Math.round(sy + (ey - sy) * k / steps);
-        sendControl({ type: "touch", action: 2, x, y, pointerId: 0 });
-        await sleep(20);
-      }
-      sendControl({ type: "touch", action: 1, x: ex, y: ey, pointerId: 0 });
-      break;
-    }
-    case "text": {
-      sendControl({ type: "text", text: s.text || "" });
-      break;
-    }
-    case "scroll": {
-      const pt = stepPoint(s, "fx", "fy", "selector");
-      if (!pt) break;
-      sendControl({ type: "scroll", x: pt.x, y: pt.y, h: s.h || 0, v: s.v || 0 });
-      break;
-    }
-    case "key": {
-      sendControl({ type: "key", action: 0, keycode: s.keycode, meta: 0 });
-      await sleep(30);
-      sendControl({ type: "key", action: 1, keycode: s.keycode, meta: 0 });
-      break;
-    }
+  }
+  return r;
+}
+
+// POST a recording step to the backend, which drives the device through
+// `adb shell input` — the same path the Rust record.rs replay uses. This lets
+// recordings replay in capture/inspect mode against any connected device, not
+// only through the live scrcpy WebSocket control channel.
+async function adbInput(path, body) {
+  try {
+    await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ serial: currentSerial() }, body)),
+    });
+  } catch (e) {
+    console.warn("adb input failed:", path, e);
   }
 }
 
-function resolveSelector(sel) {
-  // Try to find a node matching the selector; return its center.
-  if (!state.tree) return null;
-  let best = null;
-  function rec(node) {
-    const a = node.attrs || {};
-    let match = true;
-    if (sel.resource_id && a["resource-id"] !== sel.resource_id) match = false;
-    if (match && sel.text && a["text"] !== sel.text) match = false;
-    if (match && sel.content_desc && a["content-desc"] !== sel.content_desc) match = false;
-    if (match && sel.class && a["class"] !== sel.class) match = false;
-    if (match && node.bounds) {
-      best = {
-        x: Math.round((node.bounds.left + node.bounds.right) / 2),
-        y: Math.round((node.bounds.top + node.bounds.bottom) / 2),
-      };
-      return;
+async function replayStep(s) {
+  // Live scrcpy session open → inject through the low-latency WS control
+  // channel using video-frame coordinates. Otherwise fall back to
+  // `adb shell input`, exactly like the Rust record.rs replay path.
+  // Returns `ok` (false = an expected selector never matched → step flagged).
+  const viaAdb = !live.connected;
+  switch (s.action) {
+    case "tap":
+    case "long_tap": {
+      const r = await replayPoint(s, "fx", "fy", "selector", 12);
+      if (!r.pt) return false;
+      if (viaAdb) {
+        // long-press == stationary swipe of 600ms (same mapping as Rust)
+        await adbInput("/api/input/tap", { x: r.pt.x, y: r.pt.y, long: s.action === "long_tap" });
+      } else {
+        sendControl({ type: "touch", action: 0, x: r.pt.x, y: r.pt.y, pointerId: 0 });
+        await sleep(s.action === "long_tap" ? 600 : 50);
+        sendControl({ type: "touch", action: 1, x: r.pt.x, y: r.pt.y, pointerId: 0 });
+      }
+      return r.ok;
     }
-    for (const c of node.children) { rec(c); if (best) return; }
+    case "swipe": {
+      const from = await replayPoint(s, "from_fx", "from_fy", "from_selector", 6);
+      const to = await replayPoint(s, "to_fx", "to_fy", "to_selector", 6);
+      if (!from.pt || !to.pt) return false;
+      if (viaAdb) {
+        await adbInput("/api/input/swipe",
+          { x1: from.pt.x, y1: from.pt.y, x2: to.pt.x, y2: to.pt.y, ms: 200 });
+      } else {
+        const sx = from.pt.x, sy = from.pt.y, ex = to.pt.x, ey = to.pt.y;
+        sendControl({ type: "touch", action: 0, x: sx, y: sy, pointerId: 0 });
+        // Intermediate moves for smooth swipe
+        const steps = 10;
+        for (let k = 1; k <= steps; k++) {
+          const x = Math.round(sx + (ex - sx) * k / steps);
+          const y = Math.round(sy + (ey - sy) * k / steps);
+          sendControl({ type: "touch", action: 2, x, y, pointerId: 0 });
+          await sleep(20);
+        }
+        sendControl({ type: "touch", action: 1, x: ex, y: ey, pointerId: 0 });
+      }
+      return from.ok && to.ok;
+    }
+    case "text": {
+      if (viaAdb) {
+        // Mirror Rust: tap the recorded field to focus it, then type.
+        const r = await replayPoint(s, "fx", "fy", "selector", 12);
+        if (r.pt) {
+          await adbInput("/api/input/tap", { x: r.pt.x, y: r.pt.y, long: false });
+          await sleep(150);
+        }
+        if (s.text) await adbInput("/api/input/text", { text: s.text });
+        return r.ok;
+      } else {
+        if (s.text) sendControl({ type: "text", text: s.text });
+        return true;
+      }
+    }
+    case "scroll": {
+      // Web extension beyond Rust (Rust records no scroll): translate a
+      // vertical scroll into a swipe over adb so it is not dropped.
+      const r = await replayPoint(s, "fx", "fy", "selector", 6);
+      if (!r.pt) return false;
+      if (viaAdb) {
+        const v = s.v || 0;
+        const mag = Math.min(400, Math.max(120, Math.abs(v)));
+        const dy = v < 0 ? -mag : mag;
+        await adbInput("/api/input/swipe",
+          { x1: r.pt.x, y1: r.pt.y, x2: r.pt.x, y2: r.pt.y - dy, ms: 200 });
+      } else {
+        sendControl({ type: "scroll", x: r.pt.x, y: r.pt.y, h: s.h || 0, v: s.v || 0 });
+      }
+      return r.ok;
+    }
+    case "key": {
+      if (viaAdb) {
+        await adbInput("/api/input-key", { code: String(s.keycode) });
+      } else {
+        sendControl({ type: "key", action: 0, keycode: s.keycode, meta: 0 });
+        await sleep(30);
+        sendControl({ type: "key", action: 1, keycode: s.keycode, meta: 0 });
+      }
+      return true;
+    }
   }
-  rec(state.tree);
-  return best;
+  return true;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -1837,9 +2002,6 @@ function switchTab(tab) {
     updateTreeScale();
     if (state.image) fitView();
     drawOverlay();
-    // A tree grabbed during the live session describes a screen that is no
-    // longer the one on display — re-capture so highlights stay accurate.
-    if (state.treeFrom === "live" && state.image) doCapture();
   }
 }
 
@@ -1897,12 +2059,6 @@ $("#zoomFit").addEventListener("click", () => {
 
 // Live controls
 $("#liveConnect").addEventListener("click", liveConnect);
-$("#liveDump").addEventListener("click", liveDump);
-$("#liveOverlayChk").addEventListener("change", () => {
-  // drawOverlay() clears everything when the box is unchecked, and paints the
-  // faint outlines + selection when it is checked.
-  drawOverlay();
-});
 $("#liveKbdChk").addEventListener("change", (e) => {
   live.kbd = e.target.checked;
   setStatus(live.kbd ? "键盘输入已开启" : "键盘输入已关闭");
@@ -1914,6 +2070,21 @@ $("#liveText").addEventListener("keydown", (e) => {
     sendControl({ type: "text", text: v });
     if (rec.recording) recordStep({ action: "text", text: v });
     e.target.value = "";
+  }
+});
+
+// Current foreground app (mirrors the Rust build's current_app_cached readout).
+$("#liveCurApp").addEventListener("click", async () => {
+  try {
+    const res = await fetch("/api/current-app?serial=" + encodeURIComponent(currentSerial()));
+    const d = await res.json();
+    if (d.pkg) {
+      setStatus("当前应用: " + d.pkg + (d.activity ? " / " + d.activity : ""));
+    } else {
+      setStatus("未能获取当前前台应用（可能无焦点窗口）", true);
+    }
+  } catch (e) {
+    setStatus("获取当前应用失败: " + e.message, true);
   }
 });
 
@@ -2040,11 +2211,16 @@ $("#installFile").addEventListener("change", () => {
 // Recording controls
 $("#recToggle").addEventListener("click", toggleRecording);
 $("#recSave").addEventListener("click", saveRecording);
+$("#recSaveYaml").addEventListener("click", saveRecordingYaml);
 $("#recLoad").addEventListener("click", () => $("#recFile").click());
 $("#recFile").addEventListener("change", () => {
   const f = $("#recFile").files[0];
   if (f) loadRecording(f);
   $("#recFile").value = "";
+});
+$("#recReplay").addEventListener("click", () => {
+  if (!rec.steps.length) { setStatus("没有可回放的步骤，先录制或加载", true); return; }
+  startReplay();
 });
 
 function updateLiveChrome() {
@@ -2054,6 +2230,19 @@ function updateLiveChrome() {
   const on = live.active && live.connected;
   $("#liveSide").hidden = !on;
   $("#liveNav").hidden = !on;
+  updateConnBadge();
+}
+
+// Top-bar chip mirroring the Rust build's 已连接 / 未连接 badge. It appears
+// only in 实时 mode (Rust: op_mode), where a session is meaningful.
+function updateConnBadge() {
+  const el = $("#connBadge");
+  if (!el) return;
+  if (!live.active) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = live.connected ? "已连接" : "未连接";
+  el.classList.toggle("on", live.connected);
+  el.classList.toggle("off", !live.connected);
 }
 
 window.addEventListener("resize", () => {
@@ -2071,3 +2260,88 @@ refreshDevices();
 updateZoomLabel();
 loadU2Status();
 initPaneCollapse();
+
+// --------------------------------------------------------------------------- //
+// Right-click copy menu — parity with the Rust tree_copy_menu: right-click a
+// tree row (or a property row) to copy id / text / desc / class / bounds /
+// all attributes.
+// --------------------------------------------------------------------------- //
+function copyText(t) {
+  const done = () => setStatus("已复制到剪贴板");
+  const fail = () => {
+    // Clipboard API can be denied (e.g. headless / http) — fall back.
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); done(); } catch (e) { setStatus("复制失败", true); }
+    ta.remove();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done, fail);
+  } else fail();
+}
+
+function openCtxMenu(items, x, y) {
+  const ctx = $("#ctxMenu");
+  ctx.textContent = "";
+  for (const it of items) {
+    const d = document.createElement("div");
+    d.className = "ctx-item";
+    d.textContent = it.label;
+    d.title = it.value;
+    d.addEventListener("click", () => { copyText(it.value); closeCtxMenu(); });
+    ctx.appendChild(d);
+  }
+  ctx.hidden = false;
+  const r = ctx.getBoundingClientRect();
+  ctx.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 8)) + "px";
+  ctx.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 8)) + "px";
+}
+
+function closeCtxMenu() {
+  const ctx = $("#ctxMenu");
+  ctx.hidden = true;
+  ctx.textContent = "";
+}
+
+$("#treeBody").addEventListener("contextmenu", (e) => {
+  const row = e.target.closest(".tree-row");
+  if (!row) return;
+  e.preventDefault();
+  const n = state.nodes.get(parseInt(row.dataset.id, 10));
+  if (!n) return;
+  const a = n.attrs || {};
+  const items = [];
+  const add = (label, v) => { if (v) items.push({ label, value: v }); };
+  add("复制 resource-id", a["resource-id"]);
+  add("复制 text", a["text"]);
+  add("复制 content-desc", a["content-desc"]);
+  add("复制 class", a["class"]);
+  add("复制 bounds", a["bounds"]);
+  if (!items.length) add("复制节点信息", JSON.stringify(a));
+  items.push({ label: "复制全部属性", value: JSON.stringify(a, null, 2) });
+  openCtxMenu(items, e.clientX, e.clientY);
+});
+
+$("#propsBody").addEventListener("contextmenu", (e) => {
+  const row = e.target.closest(".prop-row");
+  if (!row) return;
+  e.preventDefault();
+  const k = row.querySelector(".prop-key");
+  const v = row.querySelector(".prop-val");
+  if (!v) return;
+  const val = v.textContent || "";
+  const key = k ? k.textContent : "";
+  const items = [{ label: "复制值", value: val }];
+  if (key) items.push({ label: "复制键值", value: `${key}: ${val}` });
+  openCtxMenu(items, e.clientX, e.clientY);
+});
+
+document.addEventListener("mousedown", (e) => {
+  const ctx = $("#ctxMenu");
+  if (!ctx.hidden && !ctx.contains(e.target)) closeCtxMenu();
+});
+window.addEventListener("blur", closeCtxMenu);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCtxMenu(); });

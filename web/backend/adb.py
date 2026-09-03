@@ -67,6 +67,16 @@ def capture_screen(serial: str = "") -> bytes:
     return out.stdout
 
 
+def wake_screen(serial: str = "") -> None:
+    """Best-effort: turn the display on before dumping.
+
+    `uiautomator dump` (and a meaningful screencap) fail when the screen is
+    off, so we send KEYCODE_WAKEUP (224) — it only wakes, never toggles the
+    screen off. Ignored if it errors (e.g. already on, or no input service).
+    """
+    _run(["shell", "input", "keyevent", "224"], serial=serial)
+
+
 def dump_ui(serial: str = "") -> str:
     """Dump the current UI hierarchy via `uiautomator dump` and read it back.
 
@@ -317,6 +327,32 @@ def input_key(serial: str, code: str) -> str:
     return f"已发送 keyevent {code}"
 
 
+# ---- adb input injection (replay recordings in capture mode too) ----
+# Mirrors the Rust `record.rs` replay path, which drives the device through
+# `adb shell input` regardless of whether a live scrcpy session is active.
+def input_tap(serial: str, x: int, y: int, long: bool = False) -> str:
+    if long:
+        # long-press == stationary swipe with a long duration (same as Rust)
+        _run(["shell", "input", "swipe", str(x), str(y), str(x), str(y), "600"],
+             serial=serial)
+        return f"长按 {x},{y}"
+    _run(["shell", "input", "tap", str(x), str(y)], serial=serial)
+    return f"tap {x},{y}"
+
+
+def input_swipe(serial: str, x1: int, y1: int, x2: int, y2: int, ms: int = 200) -> str:
+    _run(["shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(ms)],
+         serial=serial)
+    return "swipe"
+
+
+def input_text(serial: str, text: str) -> str:
+    # Escape '%' and spaces the way `adb shell input text` expects.
+    esc = text.replace("%", "%%").replace(" ", "%s")
+    _run(["shell", "input", "text", esc], serial=serial)
+    return "text"
+
+
 def set_brightness(serial: str, value: int) -> str:
     _run(["shell", "settings", "put", "system", "screen_brightness", str(value)], serial=serial)
     return f"亮度已设为 {value * 100 // 255}%"
@@ -354,3 +390,24 @@ def device_info_full(serial: str = "") -> dict:
     info = device_info(serial)
     info["storage"] = storage_summary(serial)
     return info
+
+
+def screen_size(serial: str = "") -> tuple[int, int]:
+    """Best-effort physical screen size via `wm size`; falls back to 1080x1920.
+
+    Mirrors record.rs `screen_size` so replay coordinate fallback matches.
+    """
+    try:
+        out = _run(["shell", "wm", "size"], serial=serial)
+        text = out.stdout.decode("utf-8", "replace")
+        for line in text.splitlines():
+            rest = line.split("size:", 1)
+            if len(rest) == 2:
+                parts = rest[1].strip().split("x")
+                if len(parts) == 2:
+                    w, h = int(parts[0].strip()), int(parts[1].strip())
+                    if w > 0 and h > 0:
+                        return w, h
+    except Exception:
+        pass
+    return (1080, 1920)

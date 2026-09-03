@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Android UI Viewer (Web)</title>
-  <link rel="stylesheet" href="/static/style.css?v=3" />
+  <link rel="stylesheet" href="/static/style.css?v=6" />
 </head>
 <body>
   <header id="topbar">
@@ -37,6 +37,7 @@
         <div id="u2Msg" class="install-result"></div>
       </div>
     </div>
+    <span id="connBadge" class="badge" hidden title="实时会话连接状态">未连接</span>
     <span id="status" class="status">就绪</span>
   </header>
 
@@ -66,19 +67,18 @@
       <option value="1" selected>流畅 (1024, ~4Mbps)</option>
       <option value="2">极速 (720, ~2Mbps)</option>
     </select>
-    <button id="liveDump" title="抓取当前 UI 层级并叠加到实时画面">抓取 UI 树</button>
-    <label class="chk" title="在实时画面上叠加 UI 控件边界">
-      <input type="checkbox" id="liveOverlayChk" /> 叠加
-    </label>
     <label class="chk" title="启用后键盘按键直接发送到设备">
       <input type="checkbox" id="liveKbdChk" /> 键盘
     </label>
     <input type="text" id="liveText" placeholder="输入文本，回车发送" title="注入文本到设备" />
+    <button id="liveCurApp" title="获取当前前台应用包名/Activity">当前应用</button>
     <span class="toolbar-sep"></span>
     <button id="recToggle" title="开始/停止录制">● 录制</button>
     <button id="recSave" title="保存录制为 JSON" disabled>保存</button>
-    <button id="recLoad" title="加载 JSON 回放">回放…</button>
-    <input type="file" id="recFile" accept=".json" hidden />
+    <button id="recSaveYaml" title="保存为 Rust 版可加载的 YAML" disabled>存 YAML</button>
+    <button id="recLoad" title="加载录制（JSON / Rust 版 YAML）">加载…</button>
+    <input type="file" id="recFile" accept=".json,.yaml,.yml" hidden />
+    <button id="recReplay" title="回放已加载/录制的步骤（再点一次中断）">▶ 回放</button>
     <label class="chk" title="回放速度倍率">
       速度 <input type="number" id="recSpeed" value="1" min="0.25" max="8" step="0.25" style="width:50px" />
     </label>
@@ -206,6 +206,9 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=3"></script>
+  <!-- Right-click copy menu (tree nodes / property rows) -->
+  <div id="ctxMenu" class="ctx-menu" hidden></div>
+
+  <script src="/static/app.js?v=9"></script>
 </body>
 </html>

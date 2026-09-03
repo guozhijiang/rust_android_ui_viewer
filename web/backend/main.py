@@ -261,6 +261,53 @@ def api_auto_brightness(b: AutoBrightBody):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ---- adb input injection (lets recordings replay in capture/inspect mode,
+#      not only through the live scrcpy WS channel — mirrors Rust record.rs) ----
+class TapBody(BaseModel):
+    serial: str = ""
+    x: int
+    y: int
+    long: bool = False
+
+
+@app.post("/api/input/tap")
+def api_input_tap(b: TapBody):
+    try:
+        return {"text": adb.input_tap(b.serial, b.x, b.y, b.long)}
+    except AppError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SwipeBody(BaseModel):
+    serial: str = ""
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+    ms: int = 200
+
+
+@app.post("/api/input/swipe")
+def api_input_swipe(b: SwipeBody):
+    try:
+        return {"text": adb.input_swipe(b.serial, b.x1, b.y1, b.x2, b.y2, b.ms)}
+    except AppError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class TextBody(BaseModel):
+    serial: str = ""
+    text: str
+
+
+@app.post("/api/input/text")
+def api_input_text(b: TextBody):
+    try:
+        return {"text": adb.input_text(b.serial, b.text)}
+    except AppError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/current-app")
 def api_current_app(serial: str = ""):
     try:
@@ -278,6 +325,7 @@ def api_capture(serial: str = ""):
     it transparently falls back to `adb uiautomator dump`.
     """
     try:
+        adb.wake_screen(serial)
         shot = adb.capture_screen(serial)
         xml = u2mod.fetch_hierarchy(serial, u2_state["u2"], 3000)
         return _to_payload(shot, xml)
@@ -285,6 +333,98 @@ def api_capture(serial: str = ""):
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"抓取失败: {e}")
+
+
+@app.get("/api/dump-ui")
+def api_dump_ui(serial: str = ""):
+    """Lightweight hierarchy-only fetch (no screenshot).
+
+    Used by replay selector resolution: it re-dumps the UI a few times so a
+    step can wait for the expected screen before falling back to raw
+    coordinates — same behavior as record.rs `resolve`.
+    """
+    try:
+        xml = u2mod.fetch_hierarchy(serial, u2_state["u2"], 3000)
+        root = uitree.parse(xml)
+        w, h = adb.screen_size(serial)
+        return {
+            "width": w,
+            "height": h,
+            "nodeCount": root.count(),
+            "tree": root.to_dict(),
+            "raw_xml": xml,
+        }
+    except AppError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"抓取层级失败: {e}")
+
+
+@app.get("/api/screen-size")
+def api_screen_size(serial: str = ""):
+    """Physical screen size via `wm size` (1080x1920 fallback, like Rust)."""
+    try:
+        w, h = adb.screen_size(serial)
+        return {"width": w, "height": h}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取屏幕尺寸失败: {e}")
+
+
+@app.post("/api/load-recording")
+async def api_load_recording(request: Request):
+    """Load a recording file saved by either flavor of the tool.
+
+    Accepts the web version's JSON *and* the Rust desktop version's YAML
+    (serde_yaml of `Vec<RecordStep>` — both share the same field names), so
+    recordings interchange between the two. Returns the steps as JSON.
+    """
+    import json as _json
+
+    text = (await request.body()).decode("utf-8", "replace")
+    steps = None
+    try:
+        parsed = _json.loads(text)
+        if isinstance(parsed, list):
+            steps = parsed
+    except Exception:
+        pass
+    if steps is None:
+        try:
+            import yaml
+
+            parsed = yaml.safe_load(text)
+            if isinstance(parsed, list):
+                steps = parsed
+        except ImportError:
+            raise HTTPException(status_code=500, detail="服务器缺少 PyYAML，无法解析 YAML 录制")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"录制文件解析失败: {e}")
+    if not steps:
+        raise HTTPException(status_code=400, detail="录制文件为空或格式错误（需要步骤列表）")
+    return {"steps": steps}
+
+
+@app.post("/api/save-recording-yaml")
+async def api_save_recording_yaml(request: Request):
+    """Convert web JSON steps to Rust-desktop-compatible YAML.
+
+    Emits exactly the shape Rust's serde_yaml produces for
+    `Vec<RecordStep>` (same snake_case field names), so a recording saved
+    here loads directly in the desktop app. Web-only extras (scroll h/v)
+    are fine: serde ignores unknown fields by default.
+    """
+    import json as _json
+
+    import yaml
+
+    try:
+        steps = _json.loads((await request.body()).decode("utf-8", "replace"))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"JSON 解析失败: {e}")
+    if not isinstance(steps, list) or not steps:
+        raise HTTPException(status_code=400, detail="步骤列表为空")
+    text = yaml.safe_dump(steps, allow_unicode=True, sort_keys=False)
+    return Response(content=text, media_type="application/x-yaml")
 
 
 # --------------------------------------------------------------------------- #
@@ -563,6 +703,16 @@ def index():
             "Expires": "0",
         },
     )
+
+
+@app.get("/favicon.ico")
+def favicon():
+    # Inline SVG phone so the browser console stays clean (no 404).
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+        '<text y="52" font-size="52">📱</text></svg>'
+    )
+    return Response(content=svg, media_type="image/svg+xml")
 
 
 if os.path.isdir(STATIC):

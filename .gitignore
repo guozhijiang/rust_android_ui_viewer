@@ -7,3 +7,6 @@ __pycache__/
 *.py[cod]
 .venv/
 *.egg-info/
+
+# E2E 调试截图
+web/shot*.png

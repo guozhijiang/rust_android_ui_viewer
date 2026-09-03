@@ -10,6 +10,13 @@
   --green: #3ecf6e;
   --red: #ff6b6b;
   --sel: #3a5a8c;
+
+  /* Side column widths, mirroring the Rust build's panels:
+     left  300px (min 220 / max 460)
+     right 560px (min 340 / max 720) — the hierarchy tree is the wide panel.
+     Kept as variables so the collapsed variants stay in sync. */
+  --col-left: 300px;
+  --col-right: 560px;
 }
 
 * { box-sizing: border-box; }
@@ -61,6 +68,25 @@ body {
 #topbar input[type="search"] { width: 200px; }
 .status { font-size: 12px; color: var(--muted); min-width: 60px; }
 
+/* Live-session status chip, mirroring the Rust top bar badge. Only shown in
+   实时 (operate) mode, so it never distracts while inspecting a screenshot. */
+.badge {
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.badge.on {
+  color: var(--green); border-color: var(--green);
+  background: rgba(62, 207, 110, 0.12);
+}
+.badge.off {
+  color: var(--red); border-color: var(--red);
+  background: rgba(255, 107, 107, 0.12);
+}
+
 /* Tabs */
 #tabs { display: flex; gap: 4px; margin-left: 10px; }
 #tabs .tab {
@@ -96,7 +122,7 @@ body {
 
 #layout {
   display: grid;
-  grid-template-columns: 300px 1fr 360px;
+  grid-template-columns: var(--col-left) 1fr var(--col-right);
   flex: 1;
   min-height: 0;
 }
@@ -104,9 +130,18 @@ body {
    freed width to the picture. Deliberately no transition: fitView() reads the
    new viewport size synchronously right after the toggle, and an animated
    column would feed it an intermediate width and mis-scale the frame. */
-#layout.left-collapsed { grid-template-columns: 28px 1fr 360px; }
-#layout.right-collapsed { grid-template-columns: 300px 1fr 28px; }
+#layout.left-collapsed { grid-template-columns: 28px 1fr var(--col-right); }
+#layout.right-collapsed { grid-template-columns: var(--col-left) 1fr 28px; }
 #layout.left-collapsed.right-collapsed { grid-template-columns: 28px 1fr 28px; }
+
+/* Narrower screens: shrink the side columns instead of starving the picture.
+   No transition (see above) — these snap, which fitView() can handle. */
+@media (max-width: 1400px) {
+  :root { --col-left: 280px; --col-right: 480px; }
+}
+@media (max-width: 1150px) {
+  :root { --col-left: 260px; --col-right: 400px; }
+}
 
 .pane-collapse {
   margin-left: auto;
@@ -478,14 +513,6 @@ body {
 .rec-status { padding: 4px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
 .rec-status.recording { color: var(--red); font-weight: 600; }
 
-/* Zoom controls (inspect toolbar) */
-.zoom-controls { display: flex; align-items: center; gap: 4px; }
-.zoom-controls button {
-  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-  border-radius: 5px; width: 26px; height: 24px; cursor: pointer; font-size: 14px;
-}
-.zoom-controls #zoomLabel { min-width: 44px; text-align: center; font-size: 12px; color: var(--muted); font-family: monospace; }
-
 /* u2 acceleration widget in the top bar (moved out of the settings tab so it is
    reachable from both UI查看 and 实时 without opening a side panel). */
 .u2-widget { position: relative; flex: 0 0 auto; }
@@ -510,3 +537,18 @@ body {
 .u2-panel-title { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
 .u2-panel .u2-label { display: block; }
 .u2-panel .quick-keys { padding: 8px 0 4px; }
+
+/* Right-click copy menu (tree nodes / property rows) — parity with the Rust
+   tree_copy_menu. Fixed-position, dark-panel, appears at the cursor. */
+.ctx-menu {
+  position: fixed; z-index: 200; min-width: 180px; max-width: 340px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+}
+.ctx-item {
+  padding: 6px 10px; font-size: 12px; color: var(--text);
+  border-radius: 5px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctx-item:hover { background: var(--sel); }
