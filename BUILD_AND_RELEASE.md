@@ -63,6 +63,20 @@ exe **不包含** scrcpy 的 `scrcpy-server` 与 FFmpeg 的 `avcodec-62.dll` / `
 
 因此发布的 exe 包无需附带 jar；需要时把 `u2_core.jar`（来自 `openatx/android-uiautomator-server-jar` 的 `assets/u2.jar`，v0.4.0）放到上述默认位置即可。
 
+### 1.5 推送门禁：pre-push 覆盖率检查
+
+每次 `git push` 都会先跑一遍 **测试 + 覆盖率门禁**（`cargo llvm-cov`，行覆盖 ≥ 90%、区域覆盖 ≥ 85%），不达标推送会被拒绝。需要真实设备 / GUI 窗口的模块（`app` / `live` / `scrcpy` / `adb` / `u2` / `main` / `lib` / `theme`）不在门禁范围内。
+
+- 钩子本体已版本化在 `hooks/pre-push`，并通过 `core.hooksPath = hooks` 生效。**换机器或重新 clone 后**若发现 push 不再检查，执行一次即可恢复：
+  ```bash
+  git config core.hooksPath hooks
+  ```
+- 整个门禁耗时约 1~3 分钟（首次含编译更久），耐心等待即可。
+- 想单独手动跑（含生成 HTML 报告到 `coverage/`）：
+  ```powershell
+  pwsh scripts/check-coverage.ps1
+  ```
+
 ---
 
 ## 2. CI 自动构建并发布（推荐）
