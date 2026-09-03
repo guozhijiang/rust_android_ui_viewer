@@ -227,6 +227,49 @@ fn yaml_skip_none_fields() {
 }
 
 #[test]
+fn yaml_from_web_output_parses() {
+    // Interop: this is byte-for-byte the shape the web app's
+    // /api/save-recording-yaml emits (snake_case, same field names), including
+    // web-only extras ("scroll" action, unknown fields) that serde must ignore.
+    let web_yaml = "\
+- action: tap
+  selector:
+    resource_id: com.example:id/btn_ok
+    class: android.widget.Button
+  fx: 0.501
+  fy: 0.733
+  app: com.example.app
+  activity: com.example.app.MainActivity
+  ts: 3.55
+- action: scroll
+  from_fx: 0.5
+  from_fy: 0.7
+  to_fx: 0.5
+  to_fy: 0.3
+  ts: 8.1
+- action: text
+  text: 'hello 阿布'
+  ts: 11.0
+";
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("rec_web_{}.yaml", std::process::id()));
+    std::fs::write(&path, web_yaml).unwrap();
+    let loaded = load_yaml(&path).unwrap();
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded[0].action, "tap");
+    assert_eq!(
+        loaded[0].selector.as_ref().unwrap().resource_id.as_deref(),
+        Some("com.example:id/btn_ok")
+    );
+    assert_eq!(loaded[0].fx, Some(0.501));
+    assert_eq!(loaded[0].app.as_deref(), Some("com.example.app"));
+    assert_eq!(loaded[1].action, "scroll"); // web-only action still deserializes
+    assert_eq!(loaded[1].from_fy, Some(0.7));
+    assert_eq!(loaded[2].text.as_deref(), Some("hello 阿布"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn load_yaml_rejects_garbage() {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("rec_bad_{}.yaml", std::process::id()));

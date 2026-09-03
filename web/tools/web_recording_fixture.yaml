@@ -1,0 +1,18 @@
+- action: tap
+  selector:
+    resource_id: com.example:id/btn_ok
+    class: android.widget.Button
+  fx: 0.501
+  fy: 0.733
+  app: com.example.app
+  activity: com.example.app.MainActivity
+  ts: 3.55
+- action: scroll
+  from_fx: 0.5
+  from_fy: 0.7
+  to_fx: 0.5
+  to_fy: 0.3
+  ts: 8.1
+- action: text
+  text: hello 阿布
+  ts: 11.0

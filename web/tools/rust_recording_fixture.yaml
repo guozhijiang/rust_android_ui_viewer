@@ -1,0 +1,24 @@
+- action: tap
+  selector:
+    resource_id: com.android.calendar:id/day_label
+    class: android.widget.TextView
+  fx: 0.523
+  fy: 0.311
+  app: com.android.calendar
+  activity: com.android.calendar.AllInOneActivity
+  ts: 12.405
+- action: text
+  selector:
+    resource_id: com.android.calendar:id/title
+  text: 周五例会
+  ts: 18.220
+- action: swipe
+  from_fx: 0.812
+  from_fy: 0.640
+  to_fx: 0.801
+  to_fy: 0.290
+  ts: 25.113
+- action: key
+  key: BACK
+  keycode: 4
+  ts: 30.004
