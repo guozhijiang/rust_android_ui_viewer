@@ -212,6 +212,8 @@ pub struct UiViewerApp {
     search: String,
     status: String,
     capturing: bool,
+    /// 侧栏手动开关 (props, tree)：None=按窗口宽度自动收纳，Some=用户手动指定。
+    panels_pin: Option<(bool, bool)>,
     zoom: f32,
     jump_to: Option<usize>,
     pan: Vec2,
@@ -548,6 +550,7 @@ impl UiViewerApp {
             search: String::new(),
             status: "就绪。点击 “Capture (adb)” 抓取设备界面，或点击「启动操作会话」实时操作设备；把截图/XML 拖入窗口也可加载。".to_string(),
             capturing: false,
+            panels_pin: None,
             zoom: 1.0,
             jump_to: None,
             pan: Vec2::ZERO,
@@ -1738,6 +1741,15 @@ impl eframe::App for UiViewerApp {
             }
         }
 
+        // ---- Side panels: auto-collapse on narrow windows, with top-bar
+        // chips to pin them open/closed by hand (M3). Thresholds are on the
+        // full window width, so toggling a panel cannot feed back into the
+        // decision (no open/close oscillation). ----
+        let avail_x = ctx.content_rect().width();
+        let auto_props = avail_x >= 700.0;
+        let auto_tree = avail_x >= 880.0;
+        let (props_open, tree_open) = self.panels_pin.unwrap_or((auto_props, auto_tree));
+
         // ---- Top panel: brand + actions + status ----
         egui::Panel::top("top")
             .frame(card_frame(ctx.global_style().visuals.dark_mode))
@@ -1761,7 +1773,7 @@ impl eframe::App for UiViewerApp {
                     ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                            .size(11.5)
+                            .size(fs::MINI)
                             .color(Theme::of(dark).text_dim),
                     )
                     .on_hover_text("Android UI Viewer 版本号");
@@ -1778,6 +1790,33 @@ impl eframe::App for UiViewerApp {
                     ui.separator();
                     if ui.button("⚙ 配置").clicked() {
                         self.show_config = !self.show_config;
+                    }
+                    // 侧栏开关：亮=展开。点击翻该侧并锁定（本会话不再自动收纳）。
+                    ui.separator();
+                    let (props_label, tree_label) = if self.op_mode {
+                        ("设备", "录制")
+                    } else {
+                        ("属性", "层级")
+                    };
+                    if ui
+                        .add(egui::Button::selectable(
+                            props_open,
+                            egui::RichText::new(props_label).size(fs::SMALL),
+                        ))
+                        .on_hover_text("切换左侧面板（窄窗下自动收纳）")
+                        .clicked()
+                    {
+                        self.panels_pin = Some((!props_open, tree_open));
+                    }
+                    if ui
+                        .add(egui::Button::selectable(
+                            tree_open,
+                            egui::RichText::new(tree_label).size(fs::SMALL),
+                        ))
+                        .on_hover_text("切换右侧面板（窄窗下自动收纳）")
+                        .clicked()
+                    {
+                        self.panels_pin = Some((props_open, !tree_open));
                     }
                     if self.capturing {
                         ui.spinner();
@@ -2005,8 +2044,8 @@ impl eframe::App for UiViewerApp {
             }
         }
 
-        // ---- Left panel: element properties (always present so the layout
-        // width is constant; content hidden in operate mode) ----
+        // ---- Left panel: element properties (hidden on narrow windows;
+        // content switches to device management in operate mode) ----
         // 响应式宽度：面板范围按窗口宽度逐帧重算（egui 每帧都会把已存
         // 宽度 clamp 进 size_range，见 panel.rs 的 Panel::show_inside_dyn），
         // 竖屏/窄窗时自动给中央区让路，不会再把中间挤成一字一行的竖缝。
@@ -2015,307 +2054,327 @@ impl eframe::App for UiViewerApp {
         let usable = (avail_x - central_min).max(300.0);
         let props_max = (usable * 0.38).clamp(112.0, 460.0);
         let props_min = 112.0_f32.min(props_max);
-        egui::Panel::left("props")
-            .frame(card_frame(ctx.global_style().visuals.dark_mode))
-            .default_size(300.0_f32.clamp(props_min, props_max))
-            .size_range(props_min..=props_max)
-            .resizable(true)
-            .show_inside(ui, |ui| {
-                ui.add_space(2.0);
-                crate::theme::compact_fonts(ui);
-                crate::theme::panel_header(
-                    ui,
-                    if self.op_mode {
-                        "设备 / 应用"
-                    } else {
-                        "元素属性"
-                    },
-                    |ui| {
+        if props_open {
+            egui::Panel::left("props")
+                .frame(card_frame(ctx.global_style().visuals.dark_mode))
+                .default_size(300.0_f32.clamp(props_min, props_max))
+                .size_range(props_min..=props_max)
+                .resizable(true)
+                .show_inside(ui, |ui| {
+                    ui.add_space(2.0);
+                    crate::theme::compact_fonts(ui);
+                    crate::theme::panel_header(
+                        ui,
                         if self.op_mode {
-                            if ui.button("↻ 刷新").clicked() {
-                                self.panel_refresh();
+                            "设备 / 应用"
+                        } else {
+                            "元素属性"
+                        },
+                        |ui| {
+                            if self.op_mode {
+                                if ui.button("↻ 刷新").clicked() {
+                                    self.panel_refresh();
+                                }
+                            } else if let Some(id) = self.selected {
+                                ui.weak(format!("id = {id}"));
                             }
-                        } else if let Some(id) = self.selected {
-                            ui.weak(format!("id = {id}"));
-                        }
-                    },
-                );
-                if self.op_mode {
+                        },
+                    );
+                    if self.op_mode {
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .id_salt("dev_panel")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.render_dev_panel(ui));
+                        return;
+                    }
                     ui.separator();
                     egui::ScrollArea::vertical()
-                        .id_salt("dev_panel")
+                        .id_salt("element_props")
                         .auto_shrink([false, false])
-                        .show(ui, |ui| self.render_dev_panel(ui));
-                    return;
-                }
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("element_props")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        if let Some(id) = self.selected {
-                            // Clone the node so the attrs borrow ends before we
-                            // hand &mut self.status to the context menus.
-                            let node = self.tree.as_ref().and_then(|t| t.find(id)).cloned();
-                            if let Some(node) = node {
-                                render_props(ui, &node, &mut self.status);
+                        .show(ui, |ui| {
+                            if let Some(id) = self.selected {
+                                // Clone the node so the attrs borrow ends before we
+                                // hand &mut self.status to the context menus.
+                                let node = self.tree.as_ref().and_then(|t| t.find(id)).cloned();
+                                if let Some(node) = node {
+                                    render_props(ui, &node, &mut self.status);
+                                } else {
+                                    ui.label("所选元素已不存在。");
+                                }
                             } else {
-                                ui.label("所选元素已不存在。");
+                                ui.label("在截图或层级树中点击一个元素以查看其属性。");
                             }
-                        } else {
-                            ui.label("在截图或层级树中点击一个元素以查看其属性。");
-                        }
-                    });
-            });
+                        });
+                });
+        }
 
-        // ---- Right panel: full-height hierarchy tree (always present so the
-        // layout width is constant; content hidden in operate mode) ----
+        // ---- Right panel: full-height hierarchy tree (hidden on narrow
+        // windows; content switches to record controls in operate mode) ----
         // 右面板拿面板总预算的剩余 62%，与左面板合计永远吃不掉中央区。
         let hier_max = (usable - props_max).clamp(120.0, 720.0);
         let hier_min = 120.0_f32.min(hier_max);
-        egui::Panel::right("right")
-            .frame(card_frame(ctx.global_style().visuals.dark_mode))
-            .default_size(560.0_f32.clamp(hier_min, hier_max))
-            .size_range(hier_min..=hier_max)
-            .resizable(true)
-            .show_inside(ui, |ui| {
-                ui.add_space(2.0);
-                crate::theme::compact_fonts(ui);
-                if self.op_mode {
-                    crate::theme::panel_header(ui, "录制控制", |_ui| {});
-                } else {
-                    crate::theme::panel_header(ui, "UI 层级结构", |ui| {
-                        if self.tree.is_some() {
-                            ui.weak(format!("{} 个节点", self.tree_count));
-                        }
-                    });
-                }
-                if self.op_mode {
-                    ui.separator();
-                    ui.label("文本输入:");
-                    ui.text_edit_singleline(&mut self.input_text);
-                    if ui.button("发送").clicked() && !self.input_text.trim().is_empty() {
-                        self.send_text(self.input_text.trim());
-                        let t = self.input_text.trim().to_string();
-                        self.record_text(&t);
-                    }
-                    ui.separator();
-                    if ui.button("抓取层级").clicked() {
-                        self.capture_hierarchy_now();
-                    }
-                    ui.separator();
-                    ui.label("录制 / 回放:");
-                    let rec_label = if self.recording {
-                        "■ 停止录制"
+        if tree_open {
+            egui::Panel::right("right")
+                .frame(card_frame(ctx.global_style().visuals.dark_mode))
+                .default_size(560.0_f32.clamp(hier_min, hier_max))
+                .size_range(hier_min..=hier_max)
+                .resizable(true)
+                .show_inside(ui, |ui| {
+                    ui.add_space(2.0);
+                    crate::theme::compact_fonts(ui);
+                    if self.op_mode {
+                        crate::theme::panel_header(ui, "录制控制", |_ui| {});
                     } else {
-                        "● 开始录制"
-                    };
-                    let dark = ui.visuals().dark_mode;
-                    let rec_btn = egui::Button::new(
-                        egui::RichText::new(rec_label)
-                            .size(fs::BUTTON)
-                            .color(Theme::of(dark).on_accent),
-                    )
-                    .fill(if self.recording {
-                        Theme::of(dark).danger
-                    } else {
-                        Theme::of(dark).success
-                    })
-                    .min_size(Vec2::new(ui.available_width().max(120.0), 28.0));
-                    if ui.add(rec_btn).clicked() {
-                        self.recording = !self.recording;
-                        if self.recording {
-                            self.steps.clear();
-                            self.replay_failed.clear();
-                            self.replay_current = None;
-                            self.last_hier = None;
-                            // Grab the current hierarchy so element selectors get
-                            // recorded alongside the fractional coordinate fallback.
-                            self.capture_hierarchy_now();
-                            self.status =
-                                "● 录制已开始：在设备上执行的操作会被记录，停止后会提示保存。"
-                                    .to_string();
-                        } else {
-                            // Stopped: offer to save. Cancelling the dialog simply
-                            // discards without saving — no separate save button needed.
-                            let n = self.steps.len();
-                            if n > 0 {
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .set_file_name(format!("recording_{}.yaml", file_timestamp()))
-                                    .add_filter("YAML", &["yaml", "yml"])
-                                    .save_file()
-                                {
-                                    match record::save_yaml(&path, &self.steps) {
-                                        Ok(_) => {
-                                            self.status = format!(
-                                                "■ 录制已停止，已保存 {} 步到 {}",
-                                                n,
-                                                path.display()
-                                            )
-                                        }
-                                        Err(e) => self.status = format!("保存失败: {e}"),
-                                    }
-                                } else {
-                                    self.status = format!("■ 录制已停止（共 {} 步，未保存）。", n);
-                                }
-                            } else {
-                                self.status = "■ 录制已停止，没有录制到任何步骤。".to_string();
-                            }
-                        }
-                    }
-                    ui.label(format!("已录制: {} 步", self.steps.len()));
-                    ui.horizontal(|ui| {
-                        if ui.button("清除").clicked() {
-                            self.steps.clear();
-                            self.status = "已清除录制。".to_string();
-                        }
-                    });
-                    ui.separator();
-                    ui.label("回放设置:");
-                    ui.horizontal(|ui| {
-                        ui.label("速度:");
-                        ui.add(
-                            egui::DragValue::new(&mut self.replay_speed)
-                                .speed(0.1)
-                                .range(0.25..=8.0),
-                        )
-                        .on_hover_text("1.0 = 录制时节奏，2.0 = 两倍速，0.5 = 半速");
-                        ui.label("循环:");
-                        ui.add(egui::DragValue::new(&mut self.replay_loops).range(0u32..=100))
-                            .on_hover_text("0 = 单次；N = 重复 N 次");
-                    });
-                    if ui.button("加载并回放…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("YAML", &["yaml", "yml"])
-                            .pick_file()
-                        {
-                            match record::load_yaml(&path) {
-                                Ok(steps) => {
-                                    if steps.is_empty() {
-                                        self.status = "录制文件为空。".to_string();
-                                    } else {
-                                        self.start_replay(steps);
-                                    }
-                                }
-                                Err(e) => self.status = format!("{e}"),
-                            }
-                        }
-                    }
-                    if self.replaying {
-                        ui.label("回放进行中…");
-                    }
-                    ui.separator();
-                    egui::collapsing_header::CollapsingHeader::new("录制步骤列表")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            if self.steps.is_empty() {
-                                ui.label("（暂无录制步骤）");
-                            } else {
-                                // Highlight: red = replay failed, green = the step
-                                // currently being recorded (last) or replayed.
-                                let active = if self.recording {
-                                    self.steps.len().saturating_sub(1)
-                                } else {
-                                    self.replay_current.unwrap_or(usize::MAX)
-                                };
-                                let base = ui.style().visuals.text_color();
-                                egui::ScrollArea::vertical()
-                                    .max_height(220.0)
-                                    .auto_shrink([false, true])
-                                    .show(ui, |ui| {
-                                        for (i, s) in self.steps.iter().enumerate() {
-                                            let color = if self.replay_failed.contains(&i) {
-                                                Theme::of_ui(ui).danger
-                                            } else if i == active
-                                                && (self.recording || self.replaying)
-                                            {
-                                                Theme::of_ui(ui).success
-                                            } else {
-                                                base
-                                            };
-                                            ui.colored_label(
-                                                color,
-                                                format!("{:>3}. {}", i + 1, s.describe()),
-                                            );
-                                        }
-                                    });
+                        crate::theme::panel_header(ui, "UI 层级结构", |ui| {
+                            if self.tree.is_some() {
+                                ui.weak(format!("{} 个节点", self.tree_count));
                             }
                         });
-                    return;
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("搜索:");
-                    ui.text_edit_singleline(&mut self.search);
-                });
-                if let Some(id) = self.selected {
-                    if let Some(node) = self.tree.as_ref().and_then(|t| t.find(id)) {
-                        if let Some(b) = &node.bounds {
-                            ui.monospace(format!(
-                                "选中: [{},{}][{},{}]  ({} x {} px)",
-                                b.left,
-                                b.top,
-                                b.right,
-                                b.bottom,
-                                b.width(),
-                                b.height()
-                            ));
+                    }
+                    if self.op_mode {
+                        ui.separator();
+                        ui.label("文本输入:");
+                        ui.text_edit_singleline(&mut self.input_text);
+                        if ui.button("发送").clicked() && !self.input_text.trim().is_empty() {
+                            self.send_text(self.input_text.trim());
+                            let t = self.input_text.trim().to_string();
+                            self.record_text(&t);
+                        }
+                        ui.separator();
+                        if ui.button("抓取层级").clicked() {
+                            self.capture_hierarchy_now();
+                        }
+                        ui.separator();
+                        ui.label("录制 / 回放:");
+                        let rec_label = if self.recording {
+                            "■ 停止录制"
+                        } else {
+                            "● 开始录制"
+                        };
+                        let dark = ui.visuals().dark_mode;
+                        let rec_btn = egui::Button::new(
+                            egui::RichText::new(rec_label)
+                                .size(fs::BUTTON)
+                                .color(Theme::of(dark).on_accent),
+                        )
+                        .fill(if self.recording {
+                            Theme::of(dark).danger
+                        } else {
+                            Theme::of(dark).success
+                        })
+                        .min_size(Vec2::new(ui.available_width().max(120.0), 28.0));
+                        if ui.add(rec_btn).clicked() {
+                            self.recording = !self.recording;
+                            if self.recording {
+                                self.steps.clear();
+                                self.replay_failed.clear();
+                                self.replay_current = None;
+                                self.last_hier = None;
+                                // Grab the current hierarchy so element selectors get
+                                // recorded alongside the fractional coordinate fallback.
+                                self.capture_hierarchy_now();
+                                self.status =
+                                    "● 录制已开始：在设备上执行的操作会被记录，停止后会提示保存。"
+                                        .to_string();
+                            } else {
+                                // Stopped: offer to save. Cancelling the dialog simply
+                                // discards without saving — no separate save button needed.
+                                let n = self.steps.len();
+                                if n > 0 {
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .set_file_name(format!(
+                                            "recording_{}.yaml",
+                                            file_timestamp()
+                                        ))
+                                        .add_filter("YAML", &["yaml", "yml"])
+                                        .save_file()
+                                    {
+                                        match record::save_yaml(&path, &self.steps) {
+                                            Ok(_) => {
+                                                self.status = format!(
+                                                    "■ 录制已停止，已保存 {} 步到 {}",
+                                                    n,
+                                                    path.display()
+                                                )
+                                            }
+                                            Err(e) => self.status = format!("保存失败: {e}"),
+                                        }
+                                    } else {
+                                        self.status =
+                                            format!("■ 录制已停止（共 {} 步，未保存）。", n);
+                                    }
+                                } else {
+                                    self.status = "■ 录制已停止，没有录制到任何步骤。".to_string();
+                                }
+                            }
+                        }
+                        ui.label(format!("已录制: {} 步", self.steps.len()));
+                        ui.horizontal(|ui| {
+                            if ui.button("清除").clicked() {
+                                self.steps.clear();
+                                self.status = "已清除录制。".to_string();
+                            }
+                        });
+                        ui.separator();
+                        ui.label("回放设置:");
+                        ui.horizontal(|ui| {
+                            ui.label("速度:");
+                            ui.add(
+                                egui::DragValue::new(&mut self.replay_speed)
+                                    .speed(0.1)
+                                    .range(0.25..=8.0),
+                            )
+                            .on_hover_text("1.0 = 录制时节奏，2.0 = 两倍速，0.5 = 半速");
+                            ui.label("循环:");
+                            ui.add(egui::DragValue::new(&mut self.replay_loops).range(0u32..=100))
+                                .on_hover_text("0 = 单次；N = 重复 N 次");
+                        });
+                        if ui.button("加载并回放…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("YAML", &["yaml", "yml"])
+                                .pick_file()
+                            {
+                                match record::load_yaml(&path) {
+                                    Ok(steps) => {
+                                        if steps.is_empty() {
+                                            self.status = "录制文件为空。".to_string();
+                                        } else {
+                                            self.start_replay(steps);
+                                        }
+                                    }
+                                    Err(e) => self.status = format!("{e}"),
+                                }
+                            }
+                        }
+                        if self.replaying {
+                            ui.label("回放进行中…");
+                        }
+                        ui.separator();
+                        egui::collapsing_header::CollapsingHeader::new("录制步骤列表")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                if self.steps.is_empty() {
+                                    ui.label("（暂无录制步骤）");
+                                } else {
+                                    // Highlight: red = replay failed, green = the step
+                                    // currently being recorded (last) or replayed.
+                                    let active = if self.recording {
+                                        self.steps.len().saturating_sub(1)
+                                    } else {
+                                        self.replay_current.unwrap_or(usize::MAX)
+                                    };
+                                    let base = ui.style().visuals.text_color();
+                                    egui::ScrollArea::vertical()
+                                        .max_height(220.0)
+                                        .auto_shrink([false, true])
+                                        .show(ui, |ui| {
+                                            for (i, s) in self.steps.iter().enumerate() {
+                                                let color = if self.replay_failed.contains(&i) {
+                                                    Theme::of_ui(ui).danger
+                                                } else if i == active
+                                                    && (self.recording || self.replaying)
+                                                {
+                                                    Theme::of_ui(ui).success
+                                                } else {
+                                                    base
+                                                };
+                                                ui.colored_label(
+                                                    color,
+                                                    format!("{:>3}. {}", i + 1, s.describe()),
+                                                );
+                                            }
+                                        });
+                                }
+                            });
+                        return;
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("搜索:");
+                        ui.text_edit_singleline(&mut self.search);
+                    });
+                    if let Some(id) = self.selected {
+                        if let Some(node) = self.tree.as_ref().and_then(|t| t.find(id)) {
+                            if let Some(b) = &node.bounds {
+                                ui.monospace(format!(
+                                    "选中: [{},{}][{},{}]  ({} x {} px)",
+                                    b.left,
+                                    b.top,
+                                    b.right,
+                                    b.bottom,
+                                    b.width(),
+                                    b.height()
+                                ));
+                            }
                         }
                     }
-                }
-                ui.separator();
+                    ui.separator();
 
-                // The tree gets the full panel height and can scroll both
-                // directions so long labels are never cut off.
-                egui::ScrollArea::both()
-                    .id_salt("hierarchy_tree")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        if let Some(tree) = &self.tree {
-                            render_tree(
-                                ui,
-                                tree,
-                                0,
-                                &self.search,
-                                &mut self.selected,
-                                &mut self.hovered_tree,
-                                &mut self.jump_to,
-                                jump,
-                                &mut self.status,
-                            );
-                        } else {
-                            ui.label("尚未加载界面层级。");
-                        }
-                    });
-            });
+                    // The tree gets the full panel height and can scroll both
+                    // directions so long labels are never cut off.
+                    egui::ScrollArea::both()
+                        .id_salt("hierarchy_tree")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if let Some(tree) = &self.tree {
+                                render_tree(
+                                    ui,
+                                    tree,
+                                    0,
+                                    &self.search,
+                                    &mut self.selected,
+                                    &mut self.hovered_tree,
+                                    &mut self.jump_to,
+                                    jump,
+                                    &mut self.status,
+                                );
+                            } else if self.capturing {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label("正在抓取界面…");
+                                });
+                            } else {
+                                ui.label("尚未加载界面层级。");
+                            }
+                        });
+                });
+        }
 
         // ---- Center: mode strip + live view (op mode) or screenshot + overlays ----
         egui::CentralPanel::default().show_inside(ui, |ui| {
             // Until the initial configuration is completed, show a setup screen
             // and don't load the device-dependent pages (capture / live).
             if !self.configured {
-                ui.centered_and_justified(|ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.heading("欢迎使用 Android UI Viewer");
-                        ui.add_space(8.0);
-                        ui.label("使用前请先完成配置：");
-                        ui.label("1. 点击右上角「⚙ 配置」，设置 ADB 路径（可浏览选择或手填）");
-                        ui.label("2. 点击「刷新」选择目标设备，并点击「连接」");
-                        ui.label("3. 点击「完成配置并进入」开始使用");
-                        ui.add_space(8.0);
-                        if ui.button("打开配置").clicked() {
-                            self.show_config = true;
-                        }
+                // 欢迎页走 ScrollArea：窄窗/竖屏下文字按面板宽度正常换行、超高可
+                // 滚动。centered_and_justified 会按内容固有宽度居中，长行在窄窗
+                // 下会被窗口边缘裁掉而不是换行。
+                egui::ScrollArea::vertical()
+                    .id_salt("welcome")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(ui.available_height() * 0.12);
+                            ui.heading("欢迎使用 Android UI Viewer");
+                            ui.add_space(8.0);
+                            ui.label("使用前请先完成配置：");
+                            ui.label("1. 点击右上角「⚙ 配置」，设置 ADB 路径（可浏览选择或手填）");
+                            ui.label("2. 点击「刷新」选择目标设备，并点击「连接」");
+                            ui.label("3. 点击「完成配置并进入」开始使用");
+                            ui.add_space(8.0);
+                            if ui.button("打开配置").clicked() {
+                                self.show_config = true;
+                            }
+                        });
                     });
-                });
                 return;
             }
             // Mode selector sits directly above the image. Picking "查看 UI"
             // immediately captures the screen + hierarchy (no separate Capture
             // click needed); picking "操作设备" starts the live control session.
             // One compact toolbar directly above the picture: mode switch + zoom.
-            // Because the side panels are always shown, this toolbar keeps a
-            // constant width and the buttons never jump when switching modes.
+            // Side-panel toggles change the toolbar width, but the buttons keep
+            // their order and the mode switch never jumps when switching modes.
             ui.horizontal_wrapped(|ui| {
                 let enabled = self.configured;
                 let dark = ui.visuals().dark_mode;
@@ -2797,9 +2856,20 @@ impl eframe::App for UiViewerApp {
                 }
             } else {
                 ui.centered_and_justified(|ui| {
-                    ui.label(
-                        "暂无截图。点击 “Capture (adb)” 抓取设备，或把截图/XML 文件拖入此窗口。",
-                    );
+                    if self.capturing {
+                        ui.vertical_centered(|ui| {
+                            ui.spinner();
+                            ui.add_space(6.0);
+                            ui.label("正在抓取设备屏幕…");
+                        });
+                    } else {
+                        ui.label(
+                            egui::RichText::new(
+                                "暂无截图。点击 “Capture (adb)” 抓取设备，或把截图/XML 文件拖入此窗口。",
+                            )
+                            .color(Theme::of(ui.visuals().dark_mode).text_dim),
+                        );
+                    }
                 });
             }
         });
