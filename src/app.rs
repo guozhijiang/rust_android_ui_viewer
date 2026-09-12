@@ -1370,9 +1370,9 @@ impl UiViewerApp {
 
     fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
         let serial = self.target_serial();
-        ui.add_space(2.0);
+        ui.add_space(4.0);
         ui.weak("系统设置直达 · 一跳进入系统对应设置页");
-        ui.add_space(2.0);
+        ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             for (name, action) in SYSTEM_SETTINGS {
                 if ui.button(*name).clicked() {
@@ -1380,63 +1380,63 @@ impl UiViewerApp {
                 }
             }
         });
-        ui.add_space(8.0);
+        // 分区之间留出呼吸间距；内容不多，直接下排不需要滚动。
+        ui.add_space(12.0);
         ui.separator();
+        ui.add_space(6.0);
         ui.weak("设备快捷操作 · 直接向设备注入按键/调节");
-        egui::ScrollArea::vertical()
-            .id_salt("settings_actions")
-            .max_height(190.0)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    // Android keycodes for the common navigation keys.
-                    if ui.button("🔒 锁屏/息屏").clicked() {
-                        input_key(&self.adb_path, &serial, "26");
-                    }
-                    if ui.button("⌂ 主页").clicked() {
-                        input_key(&self.adb_path, &serial, "3");
-                    }
-                    if ui.button("◀ 返回").clicked() {
-                        input_key(&self.adb_path, &serial, "4");
-                    }
-                    if ui.button("▤ 最近任务").clicked() {
-                        input_key(&self.adb_path, &serial, "187");
-                    }
-                    if ui.button("菜单").clicked() {
-                        input_key(&self.adb_path, &serial, "82");
-                    }
-                });
-                ui.add_space(6.0);
-                ui.weak("音量");
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("音量 −").clicked() {
-                        input_key(&self.adb_path, &serial, "25");
-                    }
-                    if ui.button("音量 ＋").clicked() {
-                        input_key(&self.adb_path, &serial, "24");
-                    }
-                    if ui.button("静音/振动").clicked() {
-                        input_key(&self.adb_path, &serial, "164"); // VOLUME_MUTE
-                    }
-                });
-                ui.add_space(6.0);
-                ui.weak("亮度");
-                ui.horizontal_wrapped(|ui| {
-                    for (label, v) in [("25%", 64u16), ("50%", 128), ("75%", 191), ("100%", 255)] {
-                        if ui.button(label).clicked() {
-                            let r = set_brightness(&self.adb_path, &serial, v);
-                            self.install_result = Some(r);
-                        }
-                    }
-                    if ui.button("自动").clicked() {
-                        let r = set_auto_brightness(&self.adb_path, &serial, true);
-                        self.install_result = Some(r);
-                    }
-                    if ui.button("手动").clicked() {
-                        let r = set_auto_brightness(&self.adb_path, &serial, false);
-                        self.install_result = Some(r);
-                    }
-                });
-            });
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            // Android keycodes for the common navigation keys.
+            if ui.button("🔒 锁屏/息屏").clicked() {
+                input_key(&self.adb_path, &serial, "26");
+            }
+            if ui.button("⌂ 主页").clicked() {
+                input_key(&self.adb_path, &serial, "3");
+            }
+            if ui.button("◀ 返回").clicked() {
+                input_key(&self.adb_path, &serial, "4");
+            }
+            if ui.button("▤ 最近任务").clicked() {
+                input_key(&self.adb_path, &serial, "187");
+            }
+            if ui.button("菜单").clicked() {
+                input_key(&self.adb_path, &serial, "82");
+            }
+        });
+        ui.add_space(12.0);
+        ui.weak("音量");
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("音量 −").clicked() {
+                input_key(&self.adb_path, &serial, "25");
+            }
+            if ui.button("音量 ＋").clicked() {
+                input_key(&self.adb_path, &serial, "24");
+            }
+            if ui.button("静音/振动").clicked() {
+                input_key(&self.adb_path, &serial, "164"); // VOLUME_MUTE
+            }
+        });
+        ui.add_space(12.0);
+        ui.weak("亮度");
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            for (label, v) in [("25%", 64u16), ("50%", 128), ("75%", 191), ("100%", 255)] {
+                if ui.button(label).clicked() {
+                    let r = set_brightness(&self.adb_path, &serial, v);
+                    self.install_result = Some(r);
+                }
+            }
+            if ui.button("自动").clicked() {
+                let r = set_auto_brightness(&self.adb_path, &serial, true);
+                self.install_result = Some(r);
+            }
+            if ui.button("手动").clicked() {
+                let r = set_auto_brightness(&self.adb_path, &serial, false);
+                self.install_result = Some(r);
+            }
+        });
         if let Some(r) = &self.install_result {
             ui.add_space(4.0);
             ui.label(r);
