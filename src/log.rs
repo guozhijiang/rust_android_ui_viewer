@@ -37,11 +37,7 @@ struct FileLogger {
 
 impl FileLogger {
     fn new(path: &std::path::Path) -> Self {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok();
+        let file = OpenOptions::new().create(true).append(true).open(path).ok();
         FileLogger {
             file: Mutex::new(file),
         }
@@ -169,10 +165,7 @@ pub fn init(level: LevelFilter) {
     let static_logger: &'static FileLogger = LOGGER.get_or_init(|| logger);
     let _ = log::set_logger(static_logger);
     log::set_max_level(level);
-    info!(
-        "日志模块已初始化，日志文件: {}",
-        path.to_string_lossy()
-    );
+    info!("日志模块已初始化，日志文件: {}", path.to_string_lossy());
 }
 
 #[cfg(test)]
@@ -235,11 +228,12 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let logger = FileLogger::new(&path);
         assert!(logger.enabled(&Metadata::builder().level(Level::Info).build()));
+        let args = format_args!("hello 1");
         let rec = Record::builder()
             .level(Level::Info)
             .target("t")
             .module_path(Some("m"))
-            .args(format_args!("hello {}", 1))
+            .args(args)
             .build();
         logger.log(&rec);
         logger.flush();
@@ -251,7 +245,7 @@ mod tests {
 
     #[test]
     fn init_installs_logger() {
+        // init 不应 panic；日志文件可能已存在或惰性创建，不在此强断言。
         init(LevelFilter::Info);
-        assert!(log_path().exists() || true); // file may already exist from prior runs
     }
 }

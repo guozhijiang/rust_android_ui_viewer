@@ -25,7 +25,7 @@ fn main() -> eframe::Result<()> {
             let scale = app::UiViewerApp::setup_fonts(&cc.egui_ctx);
             let mut viewer = app::UiViewerApp::new();
             viewer.set_ui_scale(scale);
-            Box::new(viewer)
+            Ok(Box::new(viewer))
         }),
     )
 }

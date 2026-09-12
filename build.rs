@@ -10,9 +10,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-changed={}", rc.display());
 
-    let rc_exe = find_rc_exe().expect(
-        "rc.exe not found. Install the Windows SDK or set the RC environment variable.",
-    );
+    let rc_exe = find_rc_exe()
+        .expect("rc.exe not found. Install the Windows SDK or set the RC environment variable.");
 
     let status = Command::new(&rc_exe)
         .arg("/fo")
@@ -37,11 +36,7 @@ fn find_rc_exe() -> Option<PathBuf> {
     }
 
     let host = env::var("HOST").unwrap_or_else(|_| "x86_64-pc-windows-msvc".to_string());
-    let arch_dir = if host.contains("i686") {
-        "x86"
-    } else {
-        "x64"
-    };
+    let arch_dir = if host.contains("i686") { "x86" } else { "x64" };
 
     let kits_root = PathBuf::from("C:\\Program Files (x86)\\Windows Kits\\10\\bin");
     if kits_root.exists() {

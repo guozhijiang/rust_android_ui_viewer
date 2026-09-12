@@ -2,7 +2,7 @@
 
 use android_ui_viewer::record::{
     build_selector, find_center, load_yaml, node_matches, replay, resolve, save_yaml, screen_size,
-    ReplayMsg, ReplayOpts, RecordStep, UiSelector,
+    RecordStep, ReplayMsg, ReplayOpts, UiSelector,
 };
 use android_ui_viewer::ui_tree::{parse, Node};
 
@@ -45,7 +45,10 @@ fn describe_all_actions() {
     let mut sw = RecordStep::new("swipe");
     sw.from_selector = Some(sel.clone());
     sw.to_selector = Some(sel.clone());
-    assert_eq!(sw.describe(), "滑动 id=com.x:id/a,text=hi,desc=d→id=com.x:id/a,text=hi,desc=d");
+    assert_eq!(
+        sw.describe(),
+        "滑动 id=com.x:id/a,text=hi,desc=d→id=com.x:id/a,text=hi,desc=d"
+    );
     let mut tx = RecordStep::new("text");
     tx.text = Some("abc".into());
     assert_eq!(tx.describe(), "输入文本 \"abc\"");
@@ -57,7 +60,9 @@ fn describe_all_actions() {
 
 #[test]
 fn build_selector_keeps_identifying_attrs() {
-    let n = node(r#"<hierarchy><node resource-id="a" text="b" content-desc="c" class="d"/></hierarchy>"#);
+    let n = node(
+        r#"<hierarchy><node resource-id="a" text="b" content-desc="c" class="d"/></hierarchy>"#,
+    );
     let sel = build_selector(n.find(1).unwrap());
     assert_eq!(sel.resource_id.as_deref(), Some("a"));
     assert_eq!(sel.text.as_deref(), Some("b"));
@@ -84,27 +89,85 @@ fn node_matches_empty_selector_matches_all() {
 
 #[test]
 fn node_matches_by_each_field() {
-    let xml = r#"<hierarchy><node resource-id="a" text="b" content-desc="c" class="d"/></hierarchy>"#;
+    let xml =
+        r#"<hierarchy><node resource-id="a" text="b" content-desc="c" class="d"/></hierarchy>"#;
     let t = node(xml);
     let n = t.find(1).unwrap();
-    assert!(node_matches(n, &UiSelector { resource_id: Some("a".into()), ..Default::default() }));
-    assert!(node_matches(n, &UiSelector { text: Some("b".into()), ..Default::default() }));
-    assert!(node_matches(n, &UiSelector { content_desc: Some("c".into()), ..Default::default() }));
-    assert!(node_matches(n, &UiSelector { class: Some("d".into()), ..Default::default() }));
+    assert!(node_matches(
+        n,
+        &UiSelector {
+            resource_id: Some("a".into()),
+            ..Default::default()
+        }
+    ));
+    assert!(node_matches(
+        n,
+        &UiSelector {
+            text: Some("b".into()),
+            ..Default::default()
+        }
+    ));
+    assert!(node_matches(
+        n,
+        &UiSelector {
+            content_desc: Some("c".into()),
+            ..Default::default()
+        }
+    ));
+    assert!(node_matches(
+        n,
+        &UiSelector {
+            class: Some("d".into()),
+            ..Default::default()
+        }
+    ));
     // mismatch in any single field => no match
-    assert!(!node_matches(n, &UiSelector { resource_id: Some("WRONG".into()), ..Default::default() }));
-    assert!(!node_matches(n, &UiSelector { text: Some("WRONG".into()), ..Default::default() }));
-    assert!(!node_matches(n, &UiSelector { content_desc: Some("WRONG".into()), ..Default::default() }));
-    assert!(!node_matches(n, &UiSelector { class: Some("WRONG".into()), ..Default::default() }));
+    assert!(!node_matches(
+        n,
+        &UiSelector {
+            resource_id: Some("WRONG".into()),
+            ..Default::default()
+        }
+    ));
+    assert!(!node_matches(
+        n,
+        &UiSelector {
+            text: Some("WRONG".into()),
+            ..Default::default()
+        }
+    ));
+    assert!(!node_matches(
+        n,
+        &UiSelector {
+            content_desc: Some("WRONG".into()),
+            ..Default::default()
+        }
+    ));
+    assert!(!node_matches(
+        n,
+        &UiSelector {
+            class: Some("WRONG".into()),
+            ..Default::default()
+        }
+    ));
 }
 
 #[test]
 fn node_matches_combined_fields() {
     let t = node(r#"<hierarchy><node resource-id="a" text="b" class="d"/></hierarchy>"#);
     let n = t.find(1).unwrap();
-    let sel = UiSelector { resource_id: Some("a".into()), text: Some("b".into()), class: Some("d".into()), ..Default::default() };
+    let sel = UiSelector {
+        resource_id: Some("a".into()),
+        text: Some("b".into()),
+        class: Some("d".into()),
+        ..Default::default()
+    };
     assert!(node_matches(n, &sel));
-    let wrong = UiSelector { resource_id: Some("a".into()), text: Some("WRONG".into()), ..Default::default() };
+    let wrong = UiSelector {
+        resource_id: Some("a".into()),
+        text: Some("WRONG".into()),
+        ..Default::default()
+    };
     assert!(!node_matches(n, &wrong));
 }
 
@@ -117,7 +180,10 @@ fn find_center_picks_smallest_matching() {
       </node>
     </hierarchy>"#;
     let tree = node(xml);
-    let sel = UiSelector { resource_id: Some("x".into()), ..Default::default() };
+    let sel = UiSelector {
+        resource_id: Some("x".into()),
+        ..Default::default()
+    };
     let (cx, cy) = find_center(&tree, &sel).unwrap();
     assert_eq!((cx, cy), (15, 15));
 }
@@ -125,14 +191,20 @@ fn find_center_picks_smallest_matching() {
 #[test]
 fn find_center_none_when_no_match() {
     let tree = node(r#"<hierarchy><node resource-id="a" bounds="[0,0][10,10]"/></hierarchy>"#);
-    let sel = UiSelector { resource_id: Some("nope".into()), ..Default::default() };
+    let sel = UiSelector {
+        resource_id: Some("nope".into()),
+        ..Default::default()
+    };
     assert!(find_center(&tree, &sel).is_none());
 }
 
 #[test]
 fn find_center_skips_nodes_without_bounds() {
     let tree = node(r#"<hierarchy><node resource-id="a"/></hierarchy>"#);
-    let sel = UiSelector { resource_id: Some("a".into()), ..Default::default() };
+    let sel = UiSelector {
+        resource_id: Some("a".into()),
+        ..Default::default()
+    };
     assert!(find_center(&tree, &sel).is_none());
 }
 
@@ -148,7 +220,10 @@ fn resolve_without_selector_uses_fractional_coords() {
 fn resolve_with_selector_falls_back_when_unreachable() {
     // No device: fetch fails repeatedly, so we fall back to fractional coords
     // and report `ok = false` so the UI can flag the unresolved step.
-    let sel = UiSelector { resource_id: Some("x".into()), ..Default::default() };
+    let sel = UiSelector {
+        resource_id: Some("x".into()),
+        ..Default::default()
+    };
     let some_sel = Some(sel);
     let (pt, ok) = resolve(
         "nonexistent_adb_xyz",
@@ -173,10 +248,7 @@ fn screen_size_falls_back_without_device() {
 fn yaml_round_trip() {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("rec_rt_{}.yaml", std::process::id()));
-    let steps = vec![
-        RecordStep::new("tap"),
-        RecordStep::new("text"),
-    ];
+    let steps = vec![RecordStep::new("tap"), RecordStep::new("text")];
     save_yaml(&path, &steps).unwrap();
     let loaded = load_yaml(&path).unwrap();
     assert_eq!(loaded.len(), 2);
@@ -189,8 +261,14 @@ fn yaml_preserves_all_fields() {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("rec_full_{}.yaml", std::process::id()));
     let mut s = RecordStep::new("swipe");
-    s.from_selector = Some(UiSelector { resource_id: Some("a".into()), ..Default::default() });
-    s.to_selector = Some(UiSelector { text: Some("b".into()), ..Default::default() });
+    s.from_selector = Some(UiSelector {
+        resource_id: Some("a".into()),
+        ..Default::default()
+    });
+    s.to_selector = Some(UiSelector {
+        text: Some("b".into()),
+        ..Default::default()
+    });
     s.from_fx = Some(0.1);
     s.from_fy = Some(0.2);
     s.to_fx = Some(0.3);
@@ -206,7 +284,10 @@ fn yaml_preserves_all_fields() {
     assert_eq!(loaded.len(), 1);
     let l = &loaded[0];
     assert_eq!(l.action, "swipe");
-    assert_eq!(l.from_selector.as_ref().unwrap().resource_id.as_deref(), Some("a"));
+    assert_eq!(
+        l.from_selector.as_ref().unwrap().resource_id.as_deref(),
+        Some("a")
+    );
     assert_eq!(l.to_selector.as_ref().unwrap().text.as_deref(), Some("b"));
     assert_eq!(l.from_fx, Some(0.1));
     assert_eq!(l.to_fy, Some(0.4));
@@ -289,18 +370,30 @@ fn replay_runs_all_actions_and_reports() {
         {
             let mut s = RecordStep::new("tap");
             s.ts = 0.01; // tiny gap to also exercise the inter-step wait branch
-            s.selector = Some(UiSelector { resource_id: Some("x".into()), ..Default::default() });
+            s.selector = Some(UiSelector {
+                resource_id: Some("x".into()),
+                ..Default::default()
+            });
             s
         },
         {
             let mut s = RecordStep::new("swipe");
-            s.from_selector = Some(UiSelector { resource_id: Some("a".into()), ..Default::default() });
-            s.to_selector = Some(UiSelector { resource_id: Some("b".into()), ..Default::default() });
+            s.from_selector = Some(UiSelector {
+                resource_id: Some("a".into()),
+                ..Default::default()
+            });
+            s.to_selector = Some(UiSelector {
+                resource_id: Some("b".into()),
+                ..Default::default()
+            });
             s
         },
         {
             let mut s = RecordStep::new("text");
-            s.selector = Some(UiSelector { resource_id: Some("x".into()), ..Default::default() });
+            s.selector = Some(UiSelector {
+                resource_id: Some("x".into()),
+                ..Default::default()
+            });
             s.text = Some("hello world".into());
             s
         },
@@ -311,7 +404,10 @@ fn replay_runs_all_actions_and_reports() {
         RecordStep::new("bogus"), // unknown action -> `_ => {}` arm
     ];
     let (tx, rx) = std::sync::mpsc::channel();
-    let opts = ReplayOpts { speed: 1.0, loops: 1 };
+    let opts = ReplayOpts {
+        speed: 1.0,
+        loops: 1,
+    };
     let handle = std::thread::spawn(move || {
         replay("nonexistent_adb_xyz", "", None, &steps, &tx, &opts);
     });
@@ -332,7 +428,10 @@ fn replay_runs_all_actions_and_reports() {
     }
     handle.join().unwrap();
     assert!(saw_progress, "expected at least one Progress message");
-    assert!(saw_failed, "expected a Failed message for unresolved selectors");
+    assert!(
+        saw_failed,
+        "expected a Failed message for unresolved selectors"
+    );
     assert!(saw_done, "expected Done message");
 }
 
@@ -344,7 +443,10 @@ fn replay_multi_loop_emits_info() {
         s
     }];
     let (tx, rx) = std::sync::mpsc::channel();
-    let opts = ReplayOpts { speed: 1.0, loops: 2 };
+    let opts = ReplayOpts {
+        speed: 1.0,
+        loops: 2,
+    };
     let handle = std::thread::spawn(move || {
         replay("nonexistent_adb_xyz", "", None, &steps, &tx, &opts);
     });

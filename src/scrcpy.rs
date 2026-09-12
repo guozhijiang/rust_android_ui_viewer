@@ -123,35 +123,82 @@ impl H264Decoder {
                 .map_err(|e| anyhow!("加载 avutil-60.dll 失败: {e}"))?;
         }
 
-        let av_malloc: AvMalloc = unsafe { *avutil.get(b"av_malloc\0").map_err(|e| anyhow!("av_malloc: {e}"))? };
-        let av_free: AvFree = unsafe { *avutil.get(b"av_free\0").map_err(|e| anyhow!("av_free: {e}"))? };
+        let av_malloc: AvMalloc = unsafe {
+            *avutil
+                .get(b"av_malloc\0")
+                .map_err(|e| anyhow!("av_malloc: {e}"))?
+        };
+        let av_free: AvFree = unsafe {
+            *avutil
+                .get(b"av_free\0")
+                .map_err(|e| anyhow!("av_free: {e}"))?
+        };
 
-        let find_decoder: AvcodecFindDecoder =
-            unsafe { *avcodec.get(b"avcodec_find_decoder\0").map_err(|e| anyhow!("avcodec_find_decoder: {e}"))? };
-        let alloc_ctx: AvcodecAllocContext =
-            unsafe { *avcodec.get(b"avcodec_alloc_context3\0").map_err(|e| anyhow!("avcodec_alloc_context3: {e}"))? };
-        let open2: AvcodecOpen2 =
-            unsafe { *avcodec.get(b"avcodec_open2\0").map_err(|e| anyhow!("avcodec_open2: {e}"))? };
-        let send: AvcodecSendPacket =
-            unsafe { *avcodec.get(b"avcodec_send_packet\0").map_err(|e| anyhow!("avcodec_send_packet: {e}"))? };
-        let receive: AvcodecReceiveFrame =
-            unsafe { *avcodec.get(b"avcodec_receive_frame\0").map_err(|e| anyhow!("avcodec_receive_frame: {e}"))? };
-        let free_ctx: AvcodecFreeContext =
-            unsafe { *avcodec.get(b"avcodec_free_context\0").map_err(|e| anyhow!("avcodec_free_context: {e}"))? };
-        let flush: AvcodecFlushBuffers =
-            unsafe { *avcodec.get(b"avcodec_flush_buffers\0").map_err(|e| anyhow!("avcodec_flush_buffers: {e}"))? };
-        let frame_alloc: AvFrameAlloc =
-            unsafe { *avutil.get(b"av_frame_alloc\0").map_err(|e| anyhow!("av_frame_alloc: {e}"))? };
-        let frame_free: AvFrameFree =
-            unsafe { *avutil.get(b"av_frame_free\0").map_err(|e| anyhow!("av_frame_free: {e}"))? };
-        let packet_alloc: AvPacketAlloc =
-            unsafe { *avcodec.get(b"av_packet_alloc\0").map_err(|e| anyhow!("av_packet_alloc: {e}"))? };
-        let packet_free: AvPacketFree =
-            unsafe { *avcodec.get(b"av_packet_free\0").map_err(|e| anyhow!("av_packet_free: {e}"))? };
-        let packet_from_data: AvPacketFromData =
-            unsafe { *avcodec.get(b"av_packet_from_data\0").map_err(|e| anyhow!("av_packet_from_data: {e}"))? };
-        let packet_unref: AvPacketUnref =
-            unsafe { *avcodec.get(b"av_packet_unref\0").map_err(|e| anyhow!("av_packet_unref: {e}"))? };
+        let find_decoder: AvcodecFindDecoder = unsafe {
+            *avcodec
+                .get(b"avcodec_find_decoder\0")
+                .map_err(|e| anyhow!("avcodec_find_decoder: {e}"))?
+        };
+        let alloc_ctx: AvcodecAllocContext = unsafe {
+            *avcodec
+                .get(b"avcodec_alloc_context3\0")
+                .map_err(|e| anyhow!("avcodec_alloc_context3: {e}"))?
+        };
+        let open2: AvcodecOpen2 = unsafe {
+            *avcodec
+                .get(b"avcodec_open2\0")
+                .map_err(|e| anyhow!("avcodec_open2: {e}"))?
+        };
+        let send: AvcodecSendPacket = unsafe {
+            *avcodec
+                .get(b"avcodec_send_packet\0")
+                .map_err(|e| anyhow!("avcodec_send_packet: {e}"))?
+        };
+        let receive: AvcodecReceiveFrame = unsafe {
+            *avcodec
+                .get(b"avcodec_receive_frame\0")
+                .map_err(|e| anyhow!("avcodec_receive_frame: {e}"))?
+        };
+        let free_ctx: AvcodecFreeContext = unsafe {
+            *avcodec
+                .get(b"avcodec_free_context\0")
+                .map_err(|e| anyhow!("avcodec_free_context: {e}"))?
+        };
+        let flush: AvcodecFlushBuffers = unsafe {
+            *avcodec
+                .get(b"avcodec_flush_buffers\0")
+                .map_err(|e| anyhow!("avcodec_flush_buffers: {e}"))?
+        };
+        let frame_alloc: AvFrameAlloc = unsafe {
+            *avutil
+                .get(b"av_frame_alloc\0")
+                .map_err(|e| anyhow!("av_frame_alloc: {e}"))?
+        };
+        let frame_free: AvFrameFree = unsafe {
+            *avutil
+                .get(b"av_frame_free\0")
+                .map_err(|e| anyhow!("av_frame_free: {e}"))?
+        };
+        let packet_alloc: AvPacketAlloc = unsafe {
+            *avcodec
+                .get(b"av_packet_alloc\0")
+                .map_err(|e| anyhow!("av_packet_alloc: {e}"))?
+        };
+        let packet_free: AvPacketFree = unsafe {
+            *avcodec
+                .get(b"av_packet_free\0")
+                .map_err(|e| anyhow!("av_packet_free: {e}"))?
+        };
+        let packet_from_data: AvPacketFromData = unsafe {
+            *avcodec
+                .get(b"av_packet_from_data\0")
+                .map_err(|e| anyhow!("av_packet_from_data: {e}"))?
+        };
+        let packet_unref: AvPacketUnref = unsafe {
+            *avcodec
+                .get(b"av_packet_unref\0")
+                .map_err(|e| anyhow!("av_packet_unref: {e}"))?
+        };
 
         let codec = unsafe { find_decoder(AV_CODEC_ID_H264) };
         if codec.is_null() {
@@ -176,7 +223,10 @@ impl H264Decoder {
                 }
                 free_ctx(&mut codec_ctx);
             }
-            bail!("avcodec_open2 失败 ({})", last_av_error(&avutil, &av_free, ret));
+            bail!(
+                "avcodec_open2 失败 ({})",
+                last_av_error(&avutil, &av_free, ret)
+            );
         }
 
         Ok(Self {
@@ -237,30 +287,26 @@ impl H264Decoder {
                 continue;
             }
             let conv = match frame.format {
-                AV_PIX_FMT_YUV420P => Some(
-                    yuv420p_to_rgba(
-                        frame.data[0],
-                        frame.data[1],
-                        frame.data[2],
-                        frame.linesize[0],
-                        frame.linesize[1],
-                        frame.linesize[2],
-                        w,
-                        h,
-                    ),
-                ),
-                AV_PIX_FMT_YUVJ420P => Some(
-                    yuv420p_to_rgba_full(
-                        frame.data[0],
-                        frame.data[1],
-                        frame.data[2],
-                        frame.linesize[0],
-                        frame.linesize[1],
-                        frame.linesize[2],
-                        w,
-                        h,
-                    ),
-                ),
+                AV_PIX_FMT_YUV420P => Some(yuv420p_to_rgba(
+                    frame.data[0],
+                    frame.data[1],
+                    frame.data[2],
+                    frame.linesize[0],
+                    frame.linesize[1],
+                    frame.linesize[2],
+                    w,
+                    h,
+                )),
+                AV_PIX_FMT_YUVJ420P => Some(yuv420p_to_rgba_full(
+                    frame.data[0],
+                    frame.data[1],
+                    frame.data[2],
+                    frame.linesize[0],
+                    frame.linesize[1],
+                    frame.linesize[2],
+                    w,
+                    h,
+                )),
                 AV_PIX_FMT_NV12 => Some(nv12_to_rgba(
                     frame.data[0],
                     frame.data[1],
@@ -329,6 +375,7 @@ fn yuv_full_to_rgb(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
     (r, g, b)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn yuv420p_to_rgba(
     y: *const u8,
     u: *const u8,
@@ -376,6 +423,7 @@ fn yuv420p_to_rgba(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn yuv420p_to_rgba_full(
     y: *const u8,
     u: *const u8,
@@ -414,14 +462,7 @@ fn yuv420p_to_rgba_full(
     }
 }
 
-fn nv12_to_rgba(
-    y: *const u8,
-    uv: *const u8,
-    ly: c_int,
-    luv: c_int,
-    w: i32,
-    h: i32,
-) -> RgbaFrame {
+fn nv12_to_rgba(y: *const u8, uv: *const u8, ly: c_int, luv: c_int, w: i32, h: i32) -> RgbaFrame {
     let (w, h) = (w as usize, h as usize);
     let mut rgba = vec![0u8; w * h * 4];
     let (ly, luv) = (ly as usize, luv as usize);

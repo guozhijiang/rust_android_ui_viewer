@@ -150,7 +150,10 @@ fn main() {
     check!(u32_at(&b, i + 17) == 0, "scroll buttons == 0");
     i += 21;
 
-    check!(i == b.len(), format!("total length {} == consumed {}", b.len(), i));
+    check!(
+        i == b.len(),
+        format!("total length {} == consumed {}", b.len(), i)
+    );
 
     println!("captured {} bytes", b.len());
     if failures.is_empty() {
