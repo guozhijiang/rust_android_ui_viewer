@@ -13,7 +13,9 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([800.0, 600.0]),
+            // 竖屏/窄窗可用:560pt 在 150% 缩放下也放得进 1080px 宽的竖屏
+            // 显示器;面板宽度会随窗口自适应(见 app.rs 的响应式面板)。
+            .with_min_inner_size([560.0, 420.0]),
         ..Default::default()
     };
     eframe::run_native(

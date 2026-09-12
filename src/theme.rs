@@ -130,12 +130,29 @@ pub fn c_on_accent(dark: bool) -> Color32 {
 // 卡片容器
 // ---------------------------------------------------------------------------
 
-/// 圆角 + 描边的卡片框，用于顶栏与左右侧栏。
+/// 圆角 + 描边 + 柔和投影的卡片框，用于顶栏与左右侧栏。
+/// 轻投影让卡片从画布上"浮"起来，是去廉价感最便宜的一招。
 pub fn card_frame(dark: bool) -> egui::Frame {
+    let shadow = if dark {
+        egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 2.0),
+            blur: 10.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(90),
+        }
+    } else {
+        egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 2.0),
+            blur: 12.0,
+            spread: 0.0,
+            color: Color32::from_rgba_unmultiplied(40, 55, 90, 34),
+        }
+    };
     egui::Frame::none()
         .fill(c_card(dark))
         .rounding(Rounding::same(10.0))
         .stroke(Stroke::new(1.0, c_border(dark)))
+        .shadow(shadow)
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .outer_margin(egui::Margin::symmetric(4.0, 4.0))
 }
@@ -158,7 +175,11 @@ pub fn sub_frame(dark: bool) -> egui::Frame {
 /// 中文也不会缺字——比"整个界面都用雅黑"清晰得多。
 pub fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    let font_dir = std::path::Path::new(r"C:\Windows\Fonts");
+    // 别写死 C:\Windows——不少机器系统盘在 D:/E: 上，写死会让所有
+    // 自定义字体静默加载失败，退回 egui 内置字体（无中文）。
+    let font_dir = std::env::var("SystemRoot")
+        .map(|root| std::path::Path::new(&root).join("Fonts"))
+        .unwrap_or_else(|_| std::path::Path::new(r"C:\Windows\Fonts").to_path_buf());
 
     let load = |name: &str| -> Option<Vec<u8>> {
         std::fs::read(font_dir.join(name)).ok()
@@ -207,14 +228,19 @@ pub fn setup_fonts(ctx: &egui::Context) {
 
 /// 字号表。egui 默认（正文 12.5）在中文界面上偏小偏糊，这里整体上调，
 /// 并拉开 Small/Body/Button/Heading 的层次。
+///
+/// 全部取整数：epaint 会按 round(点数 × 总缩放) 光栅化字形，再按
+/// 点数 × 总缩放 绘制。字号带小数（如 13.5）时在整数缩放下也会出现
+/// "图集 14px、绘制 13.5px"的重采样，视觉上发虚。整数字号在总缩放
+/// 为 1.0/2.0 时严格 1:1，是最锐利的选择。
 fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
     use FontFamily::{Monospace, Proportional};
     [
-        (TextStyle::Small, FontId::new(11.5, Proportional)),
-        (TextStyle::Body, FontId::new(14.0, Proportional)),
-        (TextStyle::Button, FontId::new(13.5, Proportional)),
-        (TextStyle::Heading, FontId::new(17.0, Proportional)),
-        (TextStyle::Monospace, FontId::new(13.0, Monospace)),
+        (TextStyle::Small, FontId::new(12.0, Proportional)),
+        (TextStyle::Body, FontId::new(15.0, Proportional)),
+        (TextStyle::Button, FontId::new(14.0, Proportional)),
+        (TextStyle::Heading, FontId::new(18.0, Proportional)),
+        (TextStyle::Monospace, FontId::new(14.0, Monospace)),
     ]
     .into()
 }
@@ -255,6 +281,24 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
     visuals.window_rounding = Rounding::same(12.0);
     visuals.menu_rounding = Rounding::same(8.0);
     visuals.text_cursor = Stroke::new(2.0, accent);
+    // 窗口与下拉/弹层加投影，浮动层次更明显（egui 默认阴影偏脏偏重）。
+    let win_shadow = egui::epaint::Shadow {
+        offset: egui::vec2(0.0, 4.0),
+        blur: 18.0,
+        spread: 0.0,
+        color: if dark {
+            Color32::from_black_alpha(120)
+        } else {
+            Color32::from_rgba_unmultiplied(40, 55, 90, 45)
+        },
+    };
+    visuals.window_shadow = win_shadow;
+    visuals.popup_shadow = egui::epaint::Shadow {
+        offset: egui::vec2(0.0, 3.0),
+        blur: 12.0,
+        spread: 0.0,
+        color: win_shadow.color,
+    };
 
     // 选中态（文本选择、选中行）
     visuals.selection.bg_fill = c_accent_soft(dark);
@@ -387,11 +431,12 @@ pub fn segmented<T: Copy + PartialEq>(
 /// 长属性值不那么容易换行溢出。仅作用于调用处的 ui，不影响顶栏/中央。
 pub fn compact_fonts(ui: &mut egui::Ui) {
     let st = ui.style_mut();
-    st.text_styles.insert(egui::TextStyle::Small, FontId::proportional(10.5));
-    st.text_styles.insert(egui::TextStyle::Body, FontId::proportional(12.0));
-    st.text_styles.insert(egui::TextStyle::Monospace, FontId::monospace(11.0));
-    st.text_styles.insert(egui::TextStyle::Button, FontId::proportional(12.0));
-    st.text_styles.insert(egui::TextStyle::Heading, FontId::proportional(13.0));
+    // 整数字号（理由见 text_styles）。
+    st.text_styles.insert(egui::TextStyle::Small, FontId::proportional(11.0));
+    st.text_styles.insert(egui::TextStyle::Body, FontId::proportional(13.0));
+    st.text_styles.insert(egui::TextStyle::Monospace, FontId::monospace(12.0));
+    st.text_styles.insert(egui::TextStyle::Button, FontId::proportional(13.0));
+    st.text_styles.insert(egui::TextStyle::Heading, FontId::proportional(14.0));
     // 紧凑行距，信息更密而不乱。
     st.spacing.item_spacing = Vec2::new(6.0, 4.0);
     st.spacing.button_padding = Vec2::new(8.0, 4.0);

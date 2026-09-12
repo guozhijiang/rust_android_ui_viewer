@@ -320,9 +320,12 @@ pub struct UiViewerApp {
     system_dark: bool,
     /// Whether `system_dark` has been captured yet.
     system_theme_captured: bool,
-    /// UI zoom multiplier applied on top of the OS DPI scale. Set on startup
-    /// (larger on unscaled hi-dpi screens where glyphs would be tiny) and
-    /// adjustable from the ⚙ 配置 window.
+    /// Target *total* UI scale in physical pixels per point. `0.0` means
+    /// "follow the OS DPI scale" (auto). Unlike a zoom multiplier, choosing
+    /// an absolute value (1.0 / 2.0) keeps the total on integer pixel ratios,
+    /// which is what makes egui text crisp on any monitor — fractional totals
+    /// (e.g. 1.25) force a resample of every glyph and look blurry.
+    /// Adjustable from the ⚙ 配置 window.
     ui_scale: f32,
     /// Whether the one-time look (theme + density) has been applied. Applying
     /// it every frame allocates a new Style and churns egui's caching, which
@@ -588,7 +591,7 @@ impl UiViewerApp {
             u2_auto_attempted: false,
             system_dark: false,
             system_theme_captured: false,
-            ui_scale: 1.0,
+            ui_scale: 0.0,
             look_applied: false,
         };
         // Populate the device list up front so the config window (open by
@@ -597,37 +600,52 @@ impl UiViewerApp {
         this
     }
 
-    /// Set the UI zoom multiplier (used at startup for the auto hi-dpi scale).
+    /// Set the target total UI scale. `0.0` (or anything ≤ 0) = follow the
+    /// OS scale; otherwise an absolute pixels-per-point target (1.0–3.0).
     pub fn set_ui_scale(&mut self, scale: f32) {
-        self.ui_scale = scale.clamp(0.75, 3.0);
+        self.ui_scale = if scale <= 0.0 {
+            0.0
+        } else {
+            scale.clamp(0.75, 3.0)
+        };
     }
 
-    /// Load the UI font stack (Latin/CJK/mono) and pick a sensible starting
-    /// UI scale for high-DPI or high-resolution displays.
+    /// Load the UI font stack (Latin/CJK/mono). Returns the auto-scale
+    /// sentinel `0.0` (= follow the OS DPI scale) for the caller to store.
     ///
-    /// On a 4K panel at 100% scaling the OS reports 1.0 device pixels per
-    /// point, which makes every glyph tiny and mushy; we bump the egui zoom
-    /// factor so text is rendered at a comfortable, crisp size. The user can
-    /// override it in the ⚙ 配置 window afterwards.
-    /// Returns the auto-picked UI scale so the caller can store it on the app.
+    /// Why no forced zoom any more: the old logic multiplied a 1.25 zoom on
+    /// top of 100%-scale monitors, so the *total* ended at 1.25 — a fractional
+    /// pixel ratio. egui rasterizes glyphs at round(size × total) but draws
+    /// them at size × total, so fractional totals resample every glyph and
+    /// text goes visibly soft ("看不太清"). Integer totals (1.0 / 2.0) render
+    /// 1:1 and are razor sharp. Users who want bigger text can pick 200%
+    /// (integer, crisp) or 125%/150% (bigger, slightly soft) in ⚙ 配置.
     pub fn setup_fonts(ctx: &egui::Context) -> f32 {
         crate::theme::setup_fonts(ctx);
-        let native = ctx.native_pixels_per_point().unwrap_or(1.0);
-        // >=1.2 covers the usual 125%/150% Windows scaling, where the OS
-        // already gives us crisp glyphs and extra zoom just wastes space.
-        let auto = if native < 1.2 { 1.25 } else { 1.0 };
-        ctx.set_zoom_factor(auto);
-        auto
+        // Follow the OS scale by default: zoom_factor 1.0 keeps the total at
+        // whatever the monitor uses (1.0 / 1.25 / 1.5 / 2.0).
+        ctx.set_zoom_factor(1.0);
+        0.0
     }
 
     /// Apply the chosen theme (light/dark/follow-system), font scale and UI
     /// density. Cheap to call every frame: heavy work is skipped after the
     /// first apply and only re-runs when the user changes the scale.
     fn apply_look(&mut self, ctx: &egui::Context) {
-        // UI scale can be changed at any time from the config window; keep the
-        // egui zoom factor in sync (cheap no-op when unchanged).
-        if (ctx.zoom_factor() - self.ui_scale).abs() > 0.001 {
-            ctx.set_zoom_factor(self.ui_scale);
+        // UI scale = target *total* pixels-per-point (0.0 = follow OS).
+        // zoom_factor multiplies the native scale, so convert: zoom = target/native.
+        // Recomputing per frame is a couple of float ops; the set call only
+        // fires when the user changes the setting or the window moves to a
+        // monitor with a different DPI.
+        let native = ctx.native_pixels_per_point().unwrap_or(1.0).max(0.1);
+        let target = if self.ui_scale <= 0.0 {
+            native
+        } else {
+            self.ui_scale
+        };
+        let zoom = target / native;
+        if (ctx.zoom_factor() - zoom).abs() > 0.001 {
+            ctx.set_zoom_factor(zoom);
         }
         // Apply once — re-running each frame just re-allocates the Style and
         // forces egui to re-reshape text every frame (stutters the live video).
@@ -1893,12 +1911,18 @@ impl eframe::App for UiViewerApp {
                     ui.strong("界面缩放");
                     ui.horizontal_wrapped(|ui| {
                         let mut scale = self.ui_scale;
-                        for s in [1.0f32, 1.25, 1.5, 1.75, 2.0] {
+                        // 预设是"总缩放"（最终物理像素比），不是倍率：
+                        // 0.0 = 跟随系统；1.0/2.0 是整数像素比，文字最锐利；
+                        // 1.25/1.5 更大，但在非整数比下 egui 会重采样字形，略糊。
+                        for (s, label) in [
+                            (0.0f32, "自动"),
+                            (1.0f32, "100%"),
+                            (1.25f32, "125%"),
+                            (1.5f32, "150%"),
+                            (2.0f32, "200%"),
+                        ] {
                             if ui
-                                .selectable_label(
-                                    (scale - s).abs() < 0.001,
-                                    format!("{}%", (s * 100.0) as i32),
-                                )
+                                .selectable_label((scale - s).abs() < 0.001, label)
                                 .clicked()
                             {
                                 scale = s;
@@ -1906,7 +1930,7 @@ impl eframe::App for UiViewerApp {
                         }
                         self.ui_scale = scale;
                     });
-                    ui.weak("高分屏上文字发虚时调大；下一帧生效，不影响设备画面。");
+                    ui.weak("自动=跟随系统；100%/200% 整数缩放最锐利，看不清字时优先选这两个。下一帧生效，不影响设备画面。");
                     ui.separator();
                     ui.strong("u2 快速抓树（可选）");
                     if let Some(s) = &self.u2_status {
@@ -1939,7 +1963,7 @@ impl eframe::App for UiViewerApp {
                     let ready = self.config_ready();
                     let dark = ui.visuals().dark_mode;
                     let btn = egui::Button::new(
-                        egui::RichText::new("完成配置并进入").size(13.5).color(if ready {
+                        egui::RichText::new("完成配置并进入").size(14.0).color(if ready {
                             crate::theme::c_on_accent(dark)
                         } else {
                             c_text_dim(dark)
@@ -1974,11 +1998,18 @@ impl eframe::App for UiViewerApp {
 
         // ---- Left panel: element properties (always present so the layout
         // width is constant; content hidden in operate mode) ----
+        // 响应式宽度：面板范围按窗口宽度逐帧重算（egui 每帧都会把已存
+        // 宽度 clamp 进 width_range，见 panel.rs 的 SidePanel::show_impl），
+        // 竖屏/窄窗时自动给中央区让路，不会再把中间挤成一字一行的竖缝。
+        let avail_x = ctx.screen_rect().width();
+        let central_min = 240.0_f32; // 中央区至少保住的宽度
+        let usable = (avail_x - central_min).max(300.0);
+        let props_max = (usable * 0.38).clamp(112.0, 460.0);
+        let props_min = 112.0_f32.min(props_max);
         egui::SidePanel::left("props")
             .frame(card_frame(ctx.style().visuals.dark_mode))
-            .default_width(300.0)
-            .min_width(220.0)
-            .max_width(460.0)
+            .default_width(300.0_f32.clamp(props_min, props_max))
+            .width_range(props_min..=props_max)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.add_space(2.0);
@@ -2027,11 +2058,13 @@ impl eframe::App for UiViewerApp {
 
         // ---- Right panel: full-height hierarchy tree (always present so the
         // layout width is constant; content hidden in operate mode) ----
+        // 右面板拿面板总预算的剩余 62%，与左面板合计永远吃不掉中央区。
+        let hier_max = (usable - props_max).clamp(120.0, 720.0);
+        let hier_min = 120.0_f32.min(hier_max);
         egui::SidePanel::right("right")
             .frame(card_frame(ctx.style().visuals.dark_mode))
-            .default_width(560.0)
-            .min_width(340.0)
-            .max_width(720.0)
+            .default_width(560.0_f32.clamp(hier_min, hier_max))
+            .width_range(hier_min..=hier_max)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.add_space(2.0);
@@ -2064,7 +2097,7 @@ impl eframe::App for UiViewerApp {
                     let dark = ui.visuals().dark_mode;
                     let rec_btn = egui::Button::new(
                         egui::RichText::new(rec_label)
-                            .size(13.5)
+                            .size(14.0)
                             .color(crate::theme::c_on_accent(dark)),
                     )
                     .fill(if self.recording {
