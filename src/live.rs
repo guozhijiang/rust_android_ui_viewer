@@ -11,8 +11,8 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::os::windows::process::CommandExt as _;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::scrcpy::{H264Decoder, RgbaFrame};
 use crate::log::{error, info};
+use crate::scrcpy::{H264Decoder, RgbaFrame};
 
 const DEVICE_NAME_LEN: usize = 64;
 const HEADER_LEN: usize = 12;
@@ -195,7 +195,11 @@ impl LiveControl {
     /// Inject UTF-8 text (truncated to scrcpy's 300-byte limit).
     pub fn text(&self, text: &str) {
         let bytes = text.as_bytes();
-        let b: &[u8] = if bytes.len() > 300 { &bytes[..300] } else { bytes };
+        let b: &[u8] = if bytes.len() > 300 {
+            &bytes[..300]
+        } else {
+            bytes
+        };
         let mut buf = Vec::with_capacity(5 + b.len());
         buf.push(MSG_INJECT_TEXT);
         buf.extend_from_slice(&(b.len() as u32).to_be_bytes());
@@ -434,7 +438,8 @@ fn adb_run(adb: &str, serial: &str, args: &[&str]) -> Result<std::process::Outpu
         cmd.arg("-s").arg(serial);
     }
     cmd.args(args);
-    cmd.output().map_err(|e| anyhow!("adb 命令失败 ({args:?}): {e}"))
+    cmd.output()
+        .map_err(|e| anyhow!("adb 命令失败 ({args:?}): {e}"))
 }
 
 fn adb_run_ok(adb: &str, serial: &str, args: &[&str]) -> Result<()> {
@@ -493,7 +498,11 @@ fn pkt_u64(buf: &[u8], off: usize) -> u64 {
 fn cleanup_tunnel(adb: &str, serial: &str, scid: u32, port: u16, forward: bool) {
     let name = socket_name(scid);
     if forward {
-        let _ = adb_run_ok(adb, serial, &["forward", "--remove", &format!("tcp:{port}")]);
+        let _ = adb_run_ok(
+            adb,
+            serial,
+            &["forward", "--remove", &format!("tcp:{port}")],
+        );
     } else {
         let _ = adb_run_ok(adb, serial, &["reverse", "--remove", &name]);
     }
@@ -744,9 +753,13 @@ fn run(
         let ctrl = LiveControl::from_stream(csk, 0);
         ctrl.set_size(vw, vh);
         control = Some(ctrl);
-        let _ = tx.send(LiveEvent::Status("控制通道已建立（scrcpy 实时操作）".to_string()));
+        let _ = tx.send(LiveEvent::Status(
+            "控制通道已建立（scrcpy 实时操作）".to_string(),
+        ));
     } else {
-        let _ = tx.send(LiveEvent::Status("未建立控制通道，回退到 adb 输入".to_string()));
+        let _ = tx.send(LiveEvent::Status(
+            "未建立控制通道，回退到 adb 输入".to_string(),
+        ));
     }
 
     let _ = tx.send(LiveEvent::Connected {

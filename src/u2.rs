@@ -108,7 +108,9 @@ impl U2 {
     /// The `dumpWindowHierarchy` RPC requires a positional boolean argument, so
     /// it is sent as an array payload `[false]` (the `false` = uncompressed).
     pub fn fetch_hierarchy(&self, timeout_ms: u32) -> Result<String> {
-        let body = "{\"jsonrpc\":\"2.0\",\"method\":\"dumpWindowHierarchy\",\"params\":[false],\"id\":1}".to_string();
+        let body =
+            "{\"jsonrpc\":\"2.0\",\"method\":\"dumpWindowHierarchy\",\"params\":[false],\"id\":1}"
+                .to_string();
         self.call_json_raw(body, timeout_ms)
     }
 
@@ -120,8 +122,8 @@ impl U2 {
             .send()
             .map_err(|e| anyhow!("u2 请求失败 ({}): {}", self.endpoint(), e))?;
         let text = resp.as_str().map_err(|e| anyhow!("u2 响应非文本: {e}"))?;
-        let v: serde_json::Value = serde_json::from_str(text)
-            .map_err(|e| anyhow!("u2 响应 JSON 解析失败: {e}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| anyhow!("u2 响应 JSON 解析失败: {e}"))?;
         if let Some(err) = v.get("error") {
             return Err(anyhow!("u2 RPC 错误: {}", err));
         }
@@ -137,21 +139,6 @@ fn truncate(s: &str, n: usize) -> String {
         s[..n].to_string() + "…"
     } else {
         s.to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncate_short_unchanged() {
-        assert_eq!(truncate("hi", 10), "hi");
-    }
-
-    #[test]
-    fn truncate_long_gets_ellipsis() {
-        assert_eq!(truncate("hello world", 5), "hello…");
     }
 }
 
@@ -171,4 +158,19 @@ pub fn fetch_hierarchy(
         }
     }
     adb::dump_ui_serial(adb, serial)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_short_unchanged() {
+        assert_eq!(truncate("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_long_gets_ellipsis() {
+        assert_eq!(truncate("hello world", 5), "hello…");
+    }
 }

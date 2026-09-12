@@ -109,11 +109,17 @@ pub fn device_info(adb: &str, serial: &str) -> DeviceInfo {
     DeviceInfo {
         brand: p.get("ro.product.brand").cloned().unwrap_or_default(),
         model: p.get("ro.product.model").cloned().unwrap_or_default(),
-        android: p.get("ro.build.version.release").cloned().unwrap_or_default(),
+        android: p
+            .get("ro.build.version.release")
+            .cloned()
+            .unwrap_or_default(),
         sdk: p.get("ro.build.version.sdk").cloned().unwrap_or_default(),
         resolution: sh_stdout(adb, serial, &["shell", "wm", "size"])
             .lines()
-            .find_map(|l| l.split_once("Physical size:").map(|(_, s)| s.trim().to_string()))
+            .find_map(|l| {
+                l.split_once("Physical size:")
+                    .map(|(_, s)| s.trim().to_string())
+            })
             .unwrap_or_default(),
         density: if dpi.is_empty() {
             String::new()
@@ -171,27 +177,21 @@ fn storage_summary(adb: &str, serial: &str) -> String {
 /// "third", or "running". Returns one entry per package.
 pub fn list_apps(adb: &str, serial: &str, filter: &str) -> Vec<AppInfo> {
     // Third-party set (user-installed).
-    let third: std::collections::HashSet<String> = sh_stdout(
-        adb,
-        serial,
-        &["shell", "pm", "list", "packages", "-3"],
-    )
-    .lines()
-    .filter_map(|l| l.strip_prefix("package:"))
-    .map(|s| s.trim().to_string())
-    .collect();
+    let third: std::collections::HashSet<String> =
+        sh_stdout(adb, serial, &["shell", "pm", "list", "packages", "-3"])
+            .lines()
+            .filter_map(|l| l.strip_prefix("package:"))
+            .map(|s| s.trim().to_string())
+            .collect();
 
     // Running set: package becomes the process name; match by exact name, else
     // by the longest package that is a prefix of a process name (best effort).
-    let running: std::collections::HashSet<String> = sh_stdout(
-        adb,
-        serial,
-        &["shell", "ps", "-A", "-o", "NAME"],
-    )
-    .lines()
-    .map(|s| s.trim().to_string())
-    .filter(|s| !s.is_empty() && s != "NAME")
-    .collect();
+    let running: std::collections::HashSet<String> =
+        sh_stdout(adb, serial, &["shell", "ps", "-A", "-o", "NAME"])
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "NAME")
+            .collect();
 
     // The full package list.
     let mut apps: Vec<AppInfo> = sh_stdout(adb, serial, &["shell", "pm", "list", "packages"])
@@ -201,9 +201,9 @@ pub fn list_apps(adb: &str, serial: &str, filter: &str) -> Vec<AppInfo> {
         .filter(|s| !s.is_empty())
         .map(|pkg| {
             let tp = third.contains(&pkg);
-            let running = running.iter().any(|pn| {
-                pn == &pkg || pkg.starts_with(pn) || pn.starts_with(&pkg)
-            });
+            let running = running
+                .iter()
+                .any(|pn| pn == &pkg || pkg.starts_with(pn) || pn.starts_with(&pkg));
             AppInfo {
                 package: pkg,
                 third_party: tp,
@@ -230,7 +230,12 @@ pub fn app_properties(adb: &str, serial: &str, pkg: &str) -> String {
     // so match the `key=` token anywhere on a line and read until the next space.
     let mut seen = std::collections::BTreeMap::new();
     for line in out.lines() {
-        for key in ["versionName", "versionCode", "firstInstallTime", "lastUpdateTime"] {
+        for key in [
+            "versionName",
+            "versionCode",
+            "firstInstallTime",
+            "lastUpdateTime",
+        ] {
             let pat = format!("{key}=");
             if let Some(pos) = line.find(&pat) {
                 let val = line[pos + pat.len()..]
@@ -245,10 +250,7 @@ pub fn app_properties(adb: &str, serial: &str, pkg: &str) -> String {
             }
         }
     }
-    let mut props: Vec<String> = seen
-        .into_iter()
-        .map(|(k, v)| format!("{k}: {v}"))
-        .collect();
+    let mut props: Vec<String> = seen.into_iter().map(|(k, v)| format!("{k}: {v}")).collect();
     if props.is_empty() {
         format!("未查询到 {pkg} 的信息（包未安装？）")
     } else {
@@ -259,10 +261,14 @@ pub fn app_properties(adb: &str, serial: &str, pkg: &str) -> String {
 
 /// Uninstall a package (`pm uninstall --user 0`). Returns an adb status line.
 pub fn uninstall_app(adb: &str, serial: &str, pkg: &str) -> String {
-    let out = shell(adb, serial, &["shell", "pm", "uninstall", "--user", "0", pkg])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    let out = shell(
+        adb,
+        serial,
+        &["shell", "pm", "uninstall", "--user", "0", pkg],
+    )
+    .output()
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .unwrap_or_default();
     if out.is_empty() || out == "Success" {
         format!("已卸载 {pkg}")
     } else {
@@ -278,10 +284,21 @@ pub fn input_key(adb: &str, serial: &str, code: &str) {
 /// Set screen brightness (0..255) and return the result string.
 pub fn set_brightness(adb: &str, serial: &str, value: u16) -> String {
     let v = value.to_string();
-    let out = shell(adb, serial, &["shell", "settings", "put", "system", "screen_brightness", &v])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    let out = shell(
+        adb,
+        serial,
+        &[
+            "shell",
+            "settings",
+            "put",
+            "system",
+            "screen_brightness",
+            &v,
+        ],
+    )
+    .output()
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .unwrap_or_default();
     if out.is_empty() {
         format!("亮度已设为 {}%", value as u32 * 100 / 255)
     } else {
@@ -292,8 +309,19 @@ pub fn set_brightness(adb: &str, serial: &str, value: u16) -> String {
 /// Toggle automatic brightness (`screen_brightness_mode`: 1 auto, 0 manual).
 pub fn set_auto_brightness(adb: &str, serial: &str, on: bool) -> String {
     let v = if on { "1" } else { "0" };
-    let _ = shell(adb, serial, &["shell", "settings", "put", "system", "screen_brightness_mode", v])
-        .spawn();
+    let _ = shell(
+        adb,
+        serial,
+        &[
+            "shell",
+            "settings",
+            "put",
+            "system",
+            "screen_brightness_mode",
+            v,
+        ],
+    )
+    .spawn();
     if on {
         "已开启自动亮度".to_string()
     } else {
@@ -312,7 +340,13 @@ pub fn install_apk(adb: &str, serial: &str, path: &str) -> Result<String> {
         .lines()
         .rfind(|l| !l.trim().is_empty())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| if out.status.success() { "Success".to_string() } else { "安装失败".to_string() });
+        .unwrap_or_else(|| {
+            if out.status.success() {
+                "Success".to_string()
+            } else {
+                "安装失败".to_string()
+            }
+        });
     Ok(sep)
 }
 
@@ -422,7 +456,13 @@ pub fn capture_serial(adb: &str, serial: &str) -> Result<Vec<u8>> {
     let out = c
         .args(["exec-out", "screencap", "-p"])
         .output()
-        .map_err(|e| anyhow!("无法运行 adb ({}): {}\n请确认 adb 已安装并在 PATH 中。", adb, e))?;
+        .map_err(|e| {
+            anyhow!(
+                "无法运行 adb ({}): {}\n请确认 adb 已安装并在 PATH 中。",
+                adb,
+                e
+            )
+        })?;
 
     if !out.status.success() {
         return Err(anyhow!(
@@ -471,7 +511,8 @@ pub fn dump_ui_serial(adb: &str, serial: &str) -> Result<String> {
             c.arg("-s").arg(serial);
         }
         c.args(args.split_whitespace());
-        c.output().map_err(|e| anyhow!("unable to run adb ({}): {}", adb, e))
+        c.output()
+            .map_err(|e| anyhow!("unable to run adb ({}): {}", adb, e))
     };
 
     let dump = run("shell uiautomator dump /data/local/tmp/window_dump.xml")?;

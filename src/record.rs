@@ -114,7 +114,11 @@ impl RecordStep {
             "tap" => format!("点击 [{}]", sel(&self.selector)),
             "long_tap" => format!("长按 [{}]", sel(&self.selector)),
             "swipe" => {
-                format!("滑动 {}→{}", sel(&self.from_selector), sel(&self.to_selector))
+                format!(
+                    "滑动 {}→{}",
+                    sel(&self.from_selector),
+                    sel(&self.to_selector)
+                )
             }
             "text" => format!("输入文本 \"{}\"", self.text.as_deref().unwrap_or("")),
             "key" => format!("按键 {}", self.key.as_deref().unwrap_or("")),
@@ -266,6 +270,7 @@ pub enum ReplayMsg {
 /// To keep replay fast, once a hierarchy is successfully fetched but the element
 /// is still absent we only wait a couple more short intervals (the screen may be
 /// mid-transition) and then stop, instead of hammering `tries` full retries.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve(
     adb_path: &str,
     serial: &str,
@@ -281,25 +286,28 @@ pub fn resolve(
             let fetched = crate::u2::fetch_hierarchy(adb_path, serial, u2, 1200)
                 .ok()
                 .and_then(|xml| parse(&xml).ok());
-            match fetched {
-                Some(tree) => {
-                    if let Some(c) = find_center(&tree, sel) {
-                        return (Some(c), true);
-                    }
-                    // Screen loaded but element not present: a few short retries
-                    // cover animations/transitions, then give up.
-                    if attempt >= 3 {
-                        break;
-                    }
+            if let Some(tree) = fetched {
+                if let Some(c) = find_center(&tree, sel) {
+                    return (Some(c), true);
                 }
-                None => {}
+                // Screen loaded but element not present: a few short retries
+                // cover animations/transitions, then give up.
+                if attempt >= 3 {
+                    break;
+                }
             }
             std::thread::sleep(Duration::from_millis(400));
         }
         // Selector existed but never matched: report the fallback coords.
-        (Some(((fx * size.0 as f32) as i32, (fy * size.1 as f32) as i32)), false)
+        (
+            Some(((fx * size.0 as f32) as i32, (fy * size.1 as f32) as i32)),
+            false,
+        )
     } else {
-        (Some(((fx * size.0 as f32) as i32, (fy * size.1 as f32) as i32)), true)
+        (
+            Some(((fx * size.0 as f32) as i32, (fy * size.1 as f32) as i32)),
+            true,
+        )
     }
 }
 
@@ -387,7 +395,11 @@ pub fn replay(
                         failed = true;
                     }
                     if let (Some((x1, y1)), Some((x2, y2))) = (s, e) {
-                        adb_input(adb_path, serial, &[format!("swipe {x1} {y1} {x2} {y2} 200")]);
+                        adb_input(
+                            adb_path,
+                            serial,
+                            &[format!("swipe {x1} {y1} {x2} {y2} 200")],
+                        );
                     }
                 }
                 "text" => {

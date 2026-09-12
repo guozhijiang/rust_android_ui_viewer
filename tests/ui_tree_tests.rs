@@ -18,7 +18,10 @@ fn parses_nodes_attrs_and_bounds() {
     let tree = parse(SAMPLE).expect("parse ok");
     // id 1 is the FrameLayout carrying the resource-id and bounds.
     let root = tree.find(1).unwrap();
-    assert_eq!(root.attrs.get("resource-id").unwrap(), "com.example:id/root");
+    assert_eq!(
+        root.attrs.get("resource-id").unwrap(),
+        "com.example:id/root"
+    );
     let b = root.bounds.unwrap();
     assert_eq!((b.left, b.top, b.right, b.bottom), (0, 0, 100, 200));
 }
@@ -33,14 +36,24 @@ fn empty_attributes_are_stored_as_empty_strings() {
 
 #[test]
 fn bounds_width_height() {
-    let b = Bounds { left: 10, top: 20, right: 110, bottom: 70 };
+    let b = Bounds {
+        left: 10,
+        top: 20,
+        right: 110,
+        bottom: 70,
+    };
     assert_eq!(b.width(), 100);
     assert_eq!(b.height(), 50);
 }
 
 #[test]
 fn bounds_contains_edge() {
-    let b = Bounds { left: 0, top: 0, right: 100, bottom: 200 };
+    let b = Bounds {
+        left: 0,
+        top: 0,
+        right: 100,
+        bottom: 200,
+    };
     assert!(b.contains(0, 0));
     assert!(b.contains(100, 200));
     assert!(!b.contains(101, 0));
@@ -69,7 +82,10 @@ fn find_returns_same_node_as_hit_test() {
     let tree = parse(SAMPLE).unwrap();
     let id = tree.hit_test(20, 20).unwrap();
     let by_find = tree.find(id).expect("find by id");
-    assert_eq!(by_find.attrs.get("resource-id").unwrap(), "com.example:id/title");
+    assert_eq!(
+        by_find.attrs.get("resource-id").unwrap(),
+        "com.example:id/title"
+    );
 }
 
 #[test]
@@ -143,7 +159,8 @@ fn parse_error_extra_end_tag() {
 #[test]
 fn parse_nested_start_end_branches() {
     // Exercise the Start(node w/ children) + End(pop to parent) code paths.
-    let xml = r#"<hierarchy><node bounds="[0,0][10,10]"><node bounds="[1,1][5,5]"/></node></hierarchy>"#;
+    let xml =
+        r#"<hierarchy><node bounds="[0,0][10,10]"><node bounds="[1,1][5,5]"/></node></hierarchy>"#;
     let tree = parse(xml).unwrap();
     assert_eq!(tree.count(), 3);
     assert!(tree.hit_test(2, 2).is_some());
