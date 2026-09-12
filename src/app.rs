@@ -3093,11 +3093,14 @@ fn render_props(ui: &mut egui::Ui, node: &Node, status: &mut String) {
     // 之前的 ui.label() 无论怎么设 wrap 都会被 egui 布局引擎在极窄处断行。
     // 改用 painter.text() 在绝对坐标画字——物理上不存在换行，
     // 超宽内容在 Rust 层按像素宽度手动截断。
-    const KEY_W: f32 = 118.0; // 键列起点偏移（值列从此 x 开始）
-    const ROW_H: f32 = 17.0;
+    // 字号与面板紧凑正文（分段控件等）对齐；几何常量按字号推导，改字号不失配。
+    const PROP_FONT: f32 = fs::COMPACT; // 13.0
+    const ROW_H: f32 = PROP_FONT + 7.0; // 20.0
     const PAD_L: f32 = 4.0;
-    // monospace 11px 每字符约 6.6px（epaint 默认等宽字体经验值）
-    const CHAR_W: f32 = 6.6;
+    // monospace 每字符约 0.6em（epaint 默认等宽字体经验值）
+    const CHAR_W: f32 = PROP_FONT * 0.6; // 7.8
+                                         // 键列宽：容纳最长键 "visible-to-user:"（16 字符）+ 截断判定余量
+    const KEY_W: f32 = PAD_L + 16.0 * CHAR_W + 8.0;
 
     for k in keys {
         let v = node.attrs.get(k.as_str()).map(|s| s.as_str()).unwrap_or("");
@@ -3118,7 +3121,7 @@ fn render_props(ui: &mut egui::Ui, node: &Node, status: &mut String) {
             egui::pos2(rect.left() + PAD_L, rect.center().y),
             egui::Align2::LEFT_CENTER,
             key_display,
-            egui::FontId::monospace(fs::MINI),
+            egui::FontId::monospace(PROP_FONT),
             Theme::of(dark).text_dim,
         );
 
@@ -3135,7 +3138,7 @@ fn render_props(ui: &mut egui::Ui, node: &Node, status: &mut String) {
             egui::pos2(val_x, rect.center().y),
             egui::Align2::LEFT_CENTER,
             &val_display,
-            egui::FontId::monospace(fs::MINI),
+            egui::FontId::monospace(PROP_FONT),
             Theme::of(dark).text,
         );
 
