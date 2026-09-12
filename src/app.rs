@@ -1338,9 +1338,11 @@ impl UiViewerApp {
             });
             if let Some(props) = &self.app_props {
                 ui.separator();
-                egui::ScrollArea::vertical()
+                // 双向滚动：dumpsys 每行是一条属性，横向滚动保持行完整，
+                // 不在中间折行（与元素属性行"每行一行"同一原则）。
+                egui::ScrollArea::both()
                     .id_salt("app_props")
-                    .max_height(150.0)
+                    .max_height(180.0)
                     .show(ui, |ui| {
                         ui.label(
                             egui::RichText::new(props.clone())
@@ -2279,10 +2281,17 @@ impl eframe::App for UiViewerApp {
                                                 } else {
                                                     base
                                                 };
-                                                ui.colored_label(
-                                                    color,
-                                                    format!("{:>3}. {}", i + 1, s.describe()),
-                                                );
+                                                // 每一步固定一行：超宽截断（悬停看全文），
+                                                // 不折行——步骤列表要保持"一步一行"可扫读。
+                                                let text =
+                                                    format!("{:>3}. {}", i + 1, s.describe());
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(&text).color(color),
+                                                    )
+                                                    .truncate(),
+                                                )
+                                                .on_hover_text(text);
                                             }
                                         });
                                 }

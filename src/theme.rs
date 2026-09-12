@@ -485,7 +485,7 @@ pub fn compact_fonts(ui: &mut egui::Ui) {
     let st = ui.style_mut();
     // 整数字号（理由见 fs 模块文档）。
     st.text_styles
-        .insert(egui::TextStyle::Small, FontId::proportional(11.0));
+        .insert(egui::TextStyle::Small, FontId::proportional(fs::MINI));
     st.text_styles
         .insert(egui::TextStyle::Body, FontId::proportional(fs::COMPACT));
     st.text_styles
