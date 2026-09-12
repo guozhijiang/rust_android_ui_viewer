@@ -44,7 +44,7 @@ scrcpy 视频纹理、录制回放、u2 桥接全部长在 egui 上。
     `FontData` 需 `Arc`(`.into()`)
   - 顺手对齐了 rustfmt/clippy 1.95 工具链门禁(全量格式化 + 老代码 lint 修复,
     与迁移分开提交)
-  - 待真机复核:live smoke test 帧率基线(264 帧)
+  - 待真机复核:live smoke test 帧率基线(264 帧) → **已复核(2026-09-12):见下**
 - [x] **M2 视觉系统**:design tokens(色板/间距/圆角/阴影分级)、组件样式统一
   (按钮/输入框/下拉/滚动条/树),整体走"深色工具"风格
   - theme.rs 重构为 token 中心:`Theme` 语义色集(15 字段,`of(dark)`/`of_ui(ui)` 解析)、
@@ -84,5 +84,10 @@ scrcpy 视频纹理、录制回放、u2 桥接全部长在 egui 上。
   idna/icu 是 0.34 字体栈的固定成本,release profile 已拉满(z/lto/cgu=1/abort/strip),
   ≤4.5MB 的原目标不现实;唯一可再省的 ~1MB 是砍 `default_fonts`(改用纯系统字体),
   但会引入 UI 符号(⚙↻ 等)缺字形的 tofu 风险,不做。清晰度优先于包体。
-- live 模式帧率无回归(smoke test 264 帧基线,M1 后待真机复核)
+- live 模式无回归:**已真机复核(2026-09-12)**。smoke 四项判据(连接/控制通道/注入/
+  帧流>0)全 PASS;**帧数受设备画面内容影响**(静止桌面 ~87-99,相机取景器 ~115-125),
+  旧记的"264 帧基线"是当时特定画面状态下的一次性数字,不可复现、不宜作基线。
+  硬对照:git worktree 检出 main(迁移前代码)同状态(相机前台)跑同款 smoke,
+  旧 101 帧 vs 新 100 帧(1% 噪声内)——**M1 迁移零回归**。smoke 无 GUI,egui 版本
+  本就不参与;PASS 判据 + 同条件对照才是可复现的验收口径。
 - `cargo clippy --all-targets -- -D warnings` 全绿(含 clippy 1.95 新 lint)
