@@ -4,7 +4,7 @@
 //! 层次分明、留白充足。所有颜色集中在这里，明暗主题共用同一套语义名。
 
 use eframe::egui::{
-    self, Color32, FontData, FontDefinitions, FontFamily, FontId, Rounding, Stroke, TextStyle,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle,
     Vec2,
 };
 
@@ -134,36 +134,36 @@ pub fn c_on_accent(dark: bool) -> Color32 {
 /// 轻投影让卡片从画布上"浮"起来，是去廉价感最便宜的一招。
 pub fn card_frame(dark: bool) -> egui::Frame {
     let shadow = if dark {
-        egui::epaint::Shadow {
-            offset: egui::vec2(0.0, 2.0),
-            blur: 10.0,
-            spread: 0.0,
+        egui::Shadow {
+            offset: [0, 2],
+            blur: 10,
+            spread: 0,
             color: Color32::from_black_alpha(90),
         }
     } else {
-        egui::epaint::Shadow {
-            offset: egui::vec2(0.0, 2.0),
-            blur: 12.0,
-            spread: 0.0,
+        egui::Shadow {
+            offset: [0, 2],
+            blur: 12,
+            spread: 0,
             color: Color32::from_rgba_unmultiplied(40, 55, 90, 34),
         }
     };
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(c_card(dark))
-        .rounding(Rounding::same(10.0))
+        .corner_radius(CornerRadius::same(10))
         .stroke(Stroke::new(1.0, c_border(dark)))
         .shadow(shadow)
-        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
-        .outer_margin(egui::Margin::symmetric(4.0, 4.0))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .outer_margin(egui::Margin::symmetric(4, 4))
 }
 
 /// 内嵌分组（比卡片轻一档，用于面板内的分区）。
 pub fn sub_frame(dark: bool) -> egui::Frame {
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(c_surface(dark))
-        .rounding(Rounding::same(8.0))
+        .corner_radius(CornerRadius::same(8))
         .stroke(Stroke::new(1.0, c_border(dark)))
-        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .inner_margin(egui::Margin::symmetric(8, 6))
 }
 
 // ---------------------------------------------------------------------------
@@ -181,28 +181,38 @@ pub fn setup_fonts(ctx: &egui::Context) {
         .map(|root| std::path::Path::new(&root).join("Fonts"))
         .unwrap_or_else(|_| std::path::Path::new(r"C:\Windows\Fonts").to_path_buf());
 
-    let load = |name: &str| -> Option<Vec<u8>> {
-        std::fs::read(font_dir.join(name)).ok()
-    };
+    let load = |name: &str| -> Option<Vec<u8>> { std::fs::read(font_dir.join(name)).ok() };
 
     let mut latin = false;
     if let Some(b) = load("segoeui.ttf") {
-        fonts.font_data.insert("ui-latin".to_owned(), FontData::from_owned(b));
+        fonts
+            .font_data
+            .insert("ui-latin".to_owned(), FontData::from_owned(b).into());
         latin = true;
     }
     let mut mono = false;
     if let Some(b) = load("consola.ttf") {
-        fonts.font_data.insert("ui-mono".to_owned(), FontData::from_owned(b));
+        fonts
+            .font_data
+            .insert("ui-mono".to_owned(), FontData::from_owned(b).into());
         mono = true;
     }
 
     // CJK：按顺序挑第一个存在的，作为中/日/韩字形的回退源。
-    let cjk = ["msyh.ttc", "msyhbd.ttc", "Deng.ttf", "simsun.ttc", "msjh.ttc"]
-        .iter()
-        .find_map(|f| load(f).map(|b| (f.to_string(), b)));
+    let cjk = [
+        "msyh.ttc",
+        "msyhbd.ttc",
+        "Deng.ttf",
+        "simsun.ttc",
+        "msjh.ttc",
+    ]
+    .iter()
+    .find_map(|f| load(f).map(|b| (f.to_string(), b)));
     let mut cjk_loaded = false;
     if let Some((_name, bytes)) = cjk {
-        fonts.font_data.insert("ui-cjk".to_owned(), FontData::from_owned(bytes));
+        fonts
+            .font_data
+            .insert("ui-cjk".to_owned(), FontData::from_owned(bytes).into());
         cjk_loaded = true;
     }
 
@@ -232,7 +242,8 @@ pub fn setup_fonts(ctx: &egui::Context) {
 /// 全部取整数：epaint 会按 round(点数 × 总缩放) 光栅化字形，再按
 /// 点数 × 总缩放 绘制。字号带小数（如 13.5）时在整数缩放下也会出现
 /// "图集 14px、绘制 13.5px"的重采样，视觉上发虚。整数字号在总缩放
-/// 为 1.0/2.0 时严格 1:1，是最锐利的选择。
+/// 为 1.0/2.0 时严格 1:1，是最锐利的选择。（0.34 起 hinting 已回归，
+/// 但整数字号依然是防重采样的硬前提。）
 fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
     use FontFamily::{Monospace, Proportional};
     [
@@ -278,14 +289,17 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
     visuals.panel_fill = c_canvas(dark);
     visuals.window_fill = c_card(dark);
     visuals.window_stroke = Stroke::new(1.0, border);
-    visuals.window_rounding = Rounding::same(12.0);
-    visuals.menu_rounding = Rounding::same(8.0);
-    visuals.text_cursor = Stroke::new(2.0, accent);
+    visuals.window_corner_radius = CornerRadius::same(12);
+    visuals.menu_corner_radius = CornerRadius::same(8);
+    visuals.text_cursor = egui::style::TextCursorStyle {
+        stroke: Stroke::new(2.0, accent),
+        ..Default::default()
+    };
     // 窗口与下拉/弹层加投影，浮动层次更明显（egui 默认阴影偏脏偏重）。
-    let win_shadow = egui::epaint::Shadow {
-        offset: egui::vec2(0.0, 4.0),
-        blur: 18.0,
-        spread: 0.0,
+    let win_shadow = egui::Shadow {
+        offset: [0, 4],
+        blur: 18,
+        spread: 0,
         color: if dark {
             Color32::from_black_alpha(120)
         } else {
@@ -293,10 +307,10 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
         },
     };
     visuals.window_shadow = win_shadow;
-    visuals.popup_shadow = egui::epaint::Shadow {
-        offset: egui::vec2(0.0, 3.0),
-        blur: 12.0,
-        spread: 0.0,
+    visuals.popup_shadow = egui::Shadow {
+        offset: [0, 3],
+        blur: 12,
+        spread: 0,
         color: win_shadow.color,
     };
 
@@ -304,21 +318,21 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
     visuals.selection.bg_fill = c_accent_soft(dark);
     visuals.selection.stroke = Stroke::new(1.0, accent);
 
-    let r = Rounding::same(8.0);
+    let r = CornerRadius::same(8);
 
     // 静态文本 / 分组框
     visuals.widgets.noninteractive.bg_fill = surface;
     visuals.widgets.noninteractive.weak_bg_fill = surface;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, text);
-    visuals.widgets.noninteractive.rounding = r;
+    visuals.widgets.noninteractive.corner_radius = r;
 
     // 静息：淡填充 + 细描边，让按钮在卡片上有可辨识的轮廓
     visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.inactive.weak_bg_fill = surface;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, text);
-    visuals.widgets.inactive.rounding = r;
+    visuals.widgets.inactive.corner_radius = r;
     visuals.widgets.inactive.expansion = 0.0;
 
     // 悬停：强调色淡底 + 强调色描边
@@ -326,7 +340,7 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
     visuals.widgets.hovered.weak_bg_fill = c_accent_soft(dark);
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, accent);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, text);
-    visuals.widgets.hovered.rounding = r;
+    visuals.widgets.hovered.corner_radius = r;
     visuals.widgets.hovered.expansion = 0.5;
 
     // 按下 / 选中：实心强调色
@@ -334,7 +348,7 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
     visuals.widgets.active.weak_bg_fill = accent;
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, accent);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, on_accent);
-    visuals.widgets.active.rounding = r;
+    visuals.widgets.active.corner_radius = r;
     visuals.widgets.active.expansion = 0.0;
 
     // 展开的下拉/菜单
@@ -342,7 +356,7 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
     visuals.widgets.open.weak_bg_fill = c_accent_soft(dark);
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, accent);
     visuals.widgets.open.fg_stroke = Stroke::new(1.0, text);
-    visuals.widgets.open.rounding = r;
+    visuals.widgets.open.corner_radius = r;
 
     // 层次与细节
     visuals.button_frame = true;
@@ -354,7 +368,7 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
     visuals.clip_rect_margin = 4.0;
     visuals.resize_corner_size = 12.0;
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.visuals = visuals;
     style.text_styles = text_styles();
     // 弱文本（ui.weak 之类）单独降一档，形成稳定的三级层次。
@@ -365,8 +379,8 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
     style.spacing.button_padding = Vec2::new(12.0, 6.0);
     style.spacing.interact_size = Vec2::new(40.0, 28.0);
     style.spacing.indent = 16.0;
-    style.spacing.window_margin = egui::Margin::same(12.0);
-    style.spacing.menu_margin = egui::Margin::same(8.0);
+    style.spacing.window_margin = egui::Margin::same(12);
+    style.spacing.menu_margin = egui::Margin::same(8);
     style.spacing.icon_width = 15.0;
     style.spacing.icon_spacing = 8.0;
     style.spacing.combo_width = 140.0;
@@ -376,7 +390,7 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
     style.spacing.scroll = egui::style::ScrollStyle::thin();
     style.animation_time = 0.12;
 
-    ctx.set_style(std::sync::Arc::new(style));
+    ctx.set_global_style(std::sync::Arc::new(style));
 
     // 记录弱文本色：egui 没有单独的字段，统一由 override_text_color +
     // 各处的 `.weak()` 走 noninteractive 的淡化逻辑，这里仅保证对比度。
@@ -397,11 +411,11 @@ pub fn segmented<T: Copy + PartialEq>(
 ) -> Option<T> {
     let dark = ui.visuals().dark_mode;
     let mut clicked = None;
-    let track = egui::Frame::none()
+    let track = egui::Frame::NONE
         .fill(c_surface(dark))
         .stroke(Stroke::new(1.0, c_border(dark)))
-        .rounding(Rounding::same(8.0))
-        .inner_margin(egui::Margin::same(3.0));
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(3));
     track.show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -413,7 +427,7 @@ pub fn segmented<T: Copy + PartialEq>(
             for (value, label) in options {
                 let resp = ui.add_enabled(
                     enabled,
-                    egui::SelectableLabel::new(
+                    egui::Button::selectable(
                         *value == current,
                         egui::RichText::new(*label).size(13.0),
                     ),
@@ -432,11 +446,16 @@ pub fn segmented<T: Copy + PartialEq>(
 pub fn compact_fonts(ui: &mut egui::Ui) {
     let st = ui.style_mut();
     // 整数字号（理由见 text_styles）。
-    st.text_styles.insert(egui::TextStyle::Small, FontId::proportional(11.0));
-    st.text_styles.insert(egui::TextStyle::Body, FontId::proportional(13.0));
-    st.text_styles.insert(egui::TextStyle::Monospace, FontId::monospace(12.0));
-    st.text_styles.insert(egui::TextStyle::Button, FontId::proportional(13.0));
-    st.text_styles.insert(egui::TextStyle::Heading, FontId::proportional(14.0));
+    st.text_styles
+        .insert(egui::TextStyle::Small, FontId::proportional(11.0));
+    st.text_styles
+        .insert(egui::TextStyle::Body, FontId::proportional(13.0));
+    st.text_styles
+        .insert(egui::TextStyle::Monospace, FontId::monospace(12.0));
+    st.text_styles
+        .insert(egui::TextStyle::Button, FontId::proportional(13.0));
+    st.text_styles
+        .insert(egui::TextStyle::Heading, FontId::proportional(14.0));
     // 紧凑行距，信息更密而不乱。
     st.spacing.item_spacing = Vec2::new(6.0, 4.0);
     st.spacing.button_padding = Vec2::new(8.0, 4.0);
@@ -444,16 +463,12 @@ pub fn compact_fonts(ui: &mut egui::Ui) {
 
 /// 面板标题：一条强调色竖条 + 标题，右侧可追加一个控件或说明。
 /// 让三个面板的头部风格统一，也避免 17px 的 heading 显得过重。
-pub fn panel_header(
-    ui: &mut egui::Ui,
-    title: &str,
-    add_right: impl FnOnce(&mut egui::Ui),
-) {
+pub fn panel_header(ui: &mut egui::Ui, title: &str, add_right: impl FnOnce(&mut egui::Ui)) {
     let dark = ui.visuals().dark_mode;
     ui.horizontal(|ui| {
         let (bar, _) = ui.allocate_exact_size(Vec2::new(3.0, 15.0), egui::Sense::hover());
         ui.painter()
-            .rect_filled(bar, Rounding::same(1.5), c_accent(dark));
+            .rect_filled(bar, CornerRadius::same(2), c_accent(dark));
         ui.add_space(5.0);
         ui.label(egui::RichText::new(title).size(14.0).color(c_text(dark)));
         add_right(ui);
@@ -463,20 +478,25 @@ pub fn panel_header(
 /// 顶部状态徽章（连接状态 / 回放进度等），比纯文本更好扫读。
 pub fn chip(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
     let dark = ui.visuals().dark_mode;
-    let galley = ui.painter().layout_no_wrap(
-        text.to_string(),
-        FontId::proportional(12.0),
-        color,
-    );
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), FontId::proportional(12.0), color);
     let pad = Vec2::new(8.0, 4.0);
     let size = galley.size() + pad * 2.0;
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
-    ui.painter()
-        .rect_filled(rect, Rounding::same(size.y / 2.0), c_surface(dark));
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same((size.y / 2.0) as u8),
+        c_surface(dark),
+    );
     ui.painter().rect_stroke(
         rect,
-        Rounding::same(size.y / 2.0),
-        Stroke::new(1.0, Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 90)),
+        CornerRadius::same((size.y / 2.0) as u8),
+        Stroke::new(
+            1.0,
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 90),
+        ),
+        egui::StrokeKind::Middle,
     );
     ui.painter().galley(rect.min + pad, galley, color);
     resp
