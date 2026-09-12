@@ -11,9 +11,7 @@ use eframe::egui::{
 };
 use egui::PointerButton;
 
-use crate::theme::{
-    c_accent, c_danger, c_success, c_text, c_text_dim, c_warn, card_frame, chip, segmented,
-};
+use crate::theme::{card_frame, chip, fs, overlay, radius, segmented, with_alpha, Theme};
 
 use crate::adb::{
     app_properties, capture_serial, clear_app, device_info, dump_ui, dump_ui_serial, force_stop,
@@ -359,12 +357,12 @@ enum PanelMsg {
 fn draw_badge(p: &egui::Painter, pos: Pos2, text: &str, color: Color32) {
     let galley = p.layout_no_wrap(
         text.to_string(),
-        egui::FontId::proportional(16.0),
+        egui::FontId::proportional(fs::BADGE),
         Color32::WHITE,
     );
     let size = galley.size() + egui::vec2(16.0, 10.0);
     let rect = Rect::from_min_size(pos, size);
-    p.rect_filled(rect, 6.0, color);
+    p.rect_filled(rect, egui::CornerRadius::same(radius::BADGE), color);
     p.galley(rect.min + egui::vec2(8.0, 5.0), galley, Color32::WHITE);
 }
 
@@ -1341,15 +1339,10 @@ impl UiViewerApp {
                     .id_salt("app_props")
                     .max_height(150.0)
                     .show(ui, |ui| {
-                        let dark = ui.visuals().dark_mode;
                         ui.label(
                             egui::RichText::new(props.clone())
                                 .monospace()
-                                .color(if dark {
-                                    Color32::from_rgb(200, 205, 220)
-                                } else {
-                                    Color32::from_rgb(30, 33, 42)
-                                }),
+                                .color(Theme::of_ui(ui).text),
                         );
                     });
             }
@@ -1754,19 +1747,22 @@ impl eframe::App for UiViewerApp {
                     // Brand mark: a small accent bar, so the title reads as a
                     // product header instead of just another label.
                     let (bar, _) = ui.allocate_exact_size(egui::vec2(3.0, 16.0), Sense::hover());
-                    ui.painter()
-                        .rect_filled(bar, egui::CornerRadius::same(2), c_accent(dark));
+                    ui.painter().rect_filled(
+                        bar,
+                        egui::CornerRadius::same(radius::BAR),
+                        Theme::of(dark).accent,
+                    );
                     ui.add_space(2.0);
                     ui.label(
                         egui::RichText::new("Android UI Viewer")
-                            .size(15.0)
-                            .color(c_text(dark)),
+                            .size(fs::BODY)
+                            .color(Theme::of(dark).text),
                     );
                     ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                             .size(11.5)
-                            .color(c_text_dim(dark)),
+                            .color(Theme::of(dark).text_dim),
                     )
                     .on_hover_text("Android UI Viewer 版本号");
                     ui.add_space(10.0);
@@ -1806,19 +1802,19 @@ impl eframe::App for UiViewerApp {
                         || self.status.contains("为空")
                         || self.status.contains("需要")
                     {
-                        c_danger(dark)
+                        Theme::of(dark).danger
                     } else {
-                        c_text_dim(dark)
+                        Theme::of(dark).text_dim
                     };
                     ui.colored_label(status_color, &self.status);
                     // Connection badge (operate mode only).
                     if self.op_mode {
                         ui.add_space(8.0);
                         if self.live_started {
-                            chip(ui, "已连接", c_success(dark))
+                            chip(ui, "已连接", Theme::of(dark).success)
                                 .on_hover_text("操作会话已连接（实时控制或已回退 adb）");
                         } else {
-                            chip(ui, "未连接", c_danger(dark))
+                            chip(ui, "未连接", Theme::of(dark).danger)
                                 .on_hover_text("操作会话正在建立或已结束");
                         }
                     }
@@ -1827,7 +1823,7 @@ impl eframe::App for UiViewerApp {
                         if let Some(idx) = self.replay_current {
                             let n = self.steps.len().max(1);
                             ui.add_space(8.0);
-                            chip(ui, &format!("回放 {}/{}", idx + 1, n), c_warn(dark));
+                            chip(ui, &format!("回放 {}/{}", idx + 1, n), Theme::of(dark).warn);
                             ui.add(
                                 egui::ProgressBar::new(
                                     ((idx + 1) as f32 / n as f32).clamp(0.0, 1.0),
@@ -1976,16 +1972,16 @@ impl eframe::App for UiViewerApp {
                     let ready = self.config_ready();
                     let dark = ui.visuals().dark_mode;
                     let btn = egui::Button::new(
-                        egui::RichText::new("完成配置并进入").size(14.0).color(if ready {
-                            crate::theme::c_on_accent(dark)
+                        egui::RichText::new("完成配置并进入").size(fs::BUTTON).color(if ready {
+                            Theme::of(dark).on_accent
                         } else {
-                            c_text_dim(dark)
+                            Theme::of(dark).text_dim
                         }),
                     )
                     .fill(if ready {
-                        c_accent(dark)
+                        Theme::of(dark).accent
                     } else {
-                        crate::theme::c_surface(dark)
+                        Theme::of(dark).surface
                     })
                     .min_size(Vec2::new(ui.available_width().max(120.0), 30.0));
                     if ui.add_enabled(ready, btn).clicked() {
@@ -2117,13 +2113,13 @@ impl eframe::App for UiViewerApp {
                     let dark = ui.visuals().dark_mode;
                     let rec_btn = egui::Button::new(
                         egui::RichText::new(rec_label)
-                            .size(14.0)
-                            .color(crate::theme::c_on_accent(dark)),
+                            .size(fs::BUTTON)
+                            .color(Theme::of(dark).on_accent),
                     )
                     .fill(if self.recording {
-                        c_danger(dark)
+                        Theme::of(dark).danger
                     } else {
-                        c_success(dark)
+                        Theme::of(dark).success
                     })
                     .min_size(Vec2::new(ui.available_width().max(120.0), 28.0));
                     if ui.add(rec_btn).clicked() {
@@ -2229,11 +2225,11 @@ impl eframe::App for UiViewerApp {
                                     .show(ui, |ui| {
                                         for (i, s) in self.steps.iter().enumerate() {
                                             let color = if self.replay_failed.contains(&i) {
-                                                Color32::from_rgb(235, 90, 90)
+                                                Theme::of_ui(ui).danger
                                             } else if i == active
                                                 && (self.recording || self.replaying)
                                             {
-                                                Color32::from_rgb(70, 200, 100)
+                                                Theme::of_ui(ui).success
                                             } else {
                                                 base
                                             };
@@ -2325,8 +2321,8 @@ impl eframe::App for UiViewerApp {
                 let dark = ui.visuals().dark_mode;
                 ui.label(
                     egui::RichText::new("模式")
-                        .size(12.0)
-                        .color(c_text_dim(dark)),
+                        .size(fs::SMALL)
+                        .color(Theme::of(dark).text_dim),
                 );
                 let picked = segmented(
                     ui,
@@ -2375,8 +2371,8 @@ impl eframe::App for UiViewerApp {
                 ui.separator();
                 ui.label(
                     egui::RichText::new("缩放")
-                        .size(12.0)
-                        .color(c_text_dim(dark)),
+                        .size(fs::SMALL)
+                        .color(Theme::of(dark).text_dim),
                 );
                 ui.add(egui::Slider::new(&mut self.zoom, 0.5..=4.0).text("x"));
                 if !self.op_mode && ui.button("适配").clicked() {
@@ -2434,7 +2430,7 @@ impl eframe::App for UiViewerApp {
                             ui.painter(),
                             draw_rect.min + Vec2::new(10.0, 10.0),
                             "● 录制中",
-                            Color32::from_rgba_unmultiplied(220, 40, 40, alpha),
+                            with_alpha(overlay::REC, alpha),
                         );
                         ui.ctx().request_repaint_after(Duration::from_millis(90));
                     }
@@ -2443,7 +2439,7 @@ impl eframe::App for UiViewerApp {
                             ui.painter(),
                             draw_rect.min + Vec2::new(10.0, 10.0),
                             "▶ 回放中",
-                            Color32::from_rgb(230, 150, 20),
+                            overlay::REPLAY,
                         );
                     }
 
@@ -2936,21 +2932,23 @@ fn render_tree(
 
     if ui.is_rect_visible(header.rect) {
         // Highlight the selected row in the tree so selection stays visible
-        // (painted over the header, like a selection overlay).
+        // (painted over the header, like a selection overlay). Same palette as
+        // the screenshot overlays so one element maps to one color in both views.
+        let row = egui::CornerRadius::same(radius::ROW);
         if is_selected {
             let r = header.rect.expand2(Vec2::new(3.0, 2.0));
             ui.painter()
-                .rect_filled(r, 3.0, Color32::from_rgba_unmultiplied(0, 150, 255, 55));
+                .rect_filled(r, row, with_alpha(overlay::SELECT, 55));
             ui.painter().rect_stroke(
                 r,
-                3.0,
-                Stroke::new(1.5, Color32::from_rgb(0, 150, 255)),
+                row,
+                Stroke::new(1.5, overlay::SELECT),
                 egui::StrokeKind::Middle,
             );
         } else if *hovered_tree == Some(node.id) {
             let r = header.rect.expand2(Vec2::new(3.0, 2.0));
             ui.painter()
-                .rect_filled(r, 3.0, Color32::from_rgba_unmultiplied(255, 210, 0, 28));
+                .rect_filled(r, row, with_alpha(overlay::HOVER, 28));
         }
     }
 
@@ -3050,8 +3048,8 @@ fn render_props(ui: &mut egui::Ui, node: &Node, status: &mut String) {
             egui::pos2(rect.left() + PAD_L, rect.center().y),
             egui::Align2::LEFT_CENTER,
             key_display,
-            egui::FontId::monospace(11.0),
-            crate::theme::c_text_dim(dark),
+            egui::FontId::monospace(fs::MINI),
+            Theme::of(dark).text_dim,
         );
 
         // ── 值：从 KEY_W 起画到行尾，超宽截断 + 悬停看完整 ──
@@ -3067,8 +3065,8 @@ fn render_props(ui: &mut egui::Ui, node: &Node, status: &mut String) {
             egui::pos2(val_x, rect.center().y),
             egui::Align2::LEFT_CENTER,
             &val_display,
-            egui::FontId::monospace(11.0),
-            crate::theme::c_text(dark),
+            egui::FontId::monospace(fs::MINI),
+            Theme::of(dark).text,
         );
 
         let resp = resp.on_hover_text(format!("{k}: {v}"));
@@ -3115,26 +3113,26 @@ fn draw_overlays(
         let r = Rect::from_min_max(min, max);
 
         if Some(node.id) == selected {
-            painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(0, 180, 255, 50));
+            painter.rect_filled(r, 0.0, with_alpha(overlay::SELECT, 50));
             painter.rect_stroke(
                 r,
                 0.0,
-                Stroke::new(2.0, Color32::from_rgb(0, 180, 255)),
+                Stroke::new(2.0, overlay::SELECT),
                 egui::StrokeKind::Middle,
             );
         } else if Some(node.id) == hovered {
-            painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(255, 210, 0, 40));
+            painter.rect_filled(r, 0.0, with_alpha(overlay::HOVER, 40));
             painter.rect_stroke(
                 r,
                 0.0,
-                Stroke::new(1.5, Color32::from_rgb(255, 210, 0)),
+                Stroke::new(1.5, overlay::HOVER),
                 egui::StrokeKind::Middle,
             );
         } else if draw_faint {
             painter.rect_stroke(
                 r,
                 0.0,
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 200, 255, 22)),
+                Stroke::new(1.0, with_alpha(overlay::FAINT, 22)),
                 egui::StrokeKind::Middle,
             );
         }
